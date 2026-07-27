@@ -1,0 +1,26 @@
+{
+  "name": "@hippo/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "echo 'Worker build step'",
+    "dev": "node --watch src/main.js",
+    "start": "node src/main.js",
+    "lint": "eslint src",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hippo/db": "workspace:*",
+    "@hippo/shared": "workspace:*",
+    "@hippo/notifications": "workspace:*",
+    "@hippo/ai": "workspace:*",
+    "bullmq": "^5.31.0",
+    "ioredis": "^5.4.2"
+  },
+  "devDependencies": {
+    "eslint": "^9.17.0",
+    "vitest": "^2.1.8"
+  }
+}

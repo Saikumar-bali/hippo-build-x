@@ -1,0 +1,27 @@
+{
+  "name": "@hippo/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./schema": "./src/schema/index.js",
+    "./migrations": "./src/migrations/index.js"
+  },
+  "scripts": {
+    "lint": "eslint src",
+    "clean": "rm -rf dist",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.38.3",
+    "postgres": "^3.4.5"
+  },
+  "devDependencies": {
+    "drizzle-kit": "^0.30.1",
+    "eslint": "^9.17.0"
+  }
+}

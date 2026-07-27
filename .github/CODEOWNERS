@@ -1,0 +1,36 @@
+# Code Owners — automatically request reviewers for PRs
+# See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# API modules
+/apps/api/src/modules/crm/          @backend-crm @architect
+/apps/api/src/modules/property/     @backend-property @architect
+/apps/api/src/modules/construction/ @backend-construction @architect
+/apps/api/src/modules/payment/      @backend-payment @architect
+/apps/api/src/modules/inventory/    @backend-inventory @architect
+/apps/api/src/modules/accounting/   @backend-accounting @architect
+/apps/api/src/modules/hrms/         @backend-hrms @architect
+
+# Web modules
+/apps/web/src/app/(dashboard)/crm/           @frontend-crm @design-reviewer
+/apps/web/src/app/(dashboard)/projects/      @frontend-property @design-reviewer
+/apps/web/src/app/(dashboard)/construction/  @frontend-construction @design-reviewer
+/apps/web/src/app/(dashboard)/payments/      @frontend-payment @design-reviewer
+/apps/web/src/app/(dashboard)/inventory/     @frontend-inventory @design-reviewer
+/apps/web/src/app/(dashboard)/accounting/    @frontend-accounting @design-reviewer
+
+# Mobile
+/apps/mobile/                                @mobile-team
+
+# Shared packages
+/packages/db/                                @database-team @architect
+/packages/shared/                            @platform-team @architect
+/packages/rbac/                              @security-team @architect
+/packages/notifications/                     @platform-team
+/packages/ai/                                @ai-team
+
+# CI/CD and infrastructure
+/.github/workflows/                          @devops-team
+/.github/CODEOWNERS                          @architect @devops-team
+
+# Documentation
+/docs/                                       @architect @product

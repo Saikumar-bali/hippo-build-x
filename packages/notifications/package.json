@@ -1,0 +1,21 @@
+{
+  "name": "@hippo/notifications",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./adapters": "./src/adapters/index.js",
+    "./templates": "./src/templates/index.js"
+  },
+  "scripts": {
+    "lint": "eslint src",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hippo/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "eslint": "^9.17.0"
+  }
+}

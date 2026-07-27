@@ -1,0 +1,22 @@
+{
+  "name": "@hippo/shared",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./contracts": "./src/contracts/index.js",
+    "./types": "./src/types/index.js",
+    "./enums": "./src/enums/index.js",
+    "./errors": "./src/errors/index.js",
+    "./events": "./src/events/index.js",
+    "./validation": "./src/validation/index.js"
+  },
+  "scripts": {
+    "lint": "eslint src",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "eslint": "^9.17.0"
+  }
+}
