@@ -59,7 +59,7 @@ A professional project should define clear team ownership.
 | Product | Requirements, acceptance criteria, priorities, workflow review |
 | Architecture | Technical direction, module boundaries, shared contracts |
 | Platform | Monorepo, tenancy, shared libraries, events, queues |
-| Backend | NestJS modules, services, repositories, DTOs, jobs |
+| Backend | Next.js API Routes, services, repositories, DTOs, jobs |
 | Web | Next.js, Tailwind CSS, TanStack Query, dashboards, portals |
 | Mobile | Flutter role experiences, offline sync, device features |
 | Database | Drizzle schemas, migrations, indexes, migration runner |
@@ -100,7 +100,7 @@ Recommended ownership records:
 Example `CODEOWNERS`:
 
 ```text
-/apps/api/src/modules/crm/          @backend-crm @architect
+/apps/web/src/modules/crm/          @backend-crm @architect
 /apps/web/src/modules/crm/          @frontend-crm @design-reviewer
 /apps/mobile/lib/features/crm/      @mobile-team
 /packages/db/                       @database-team @architect
@@ -120,8 +120,6 @@ Use the monorepo structure below.
 ```text
 /apps
   /web
-  /api
-  /worker
   /mobile
 
 /packages
@@ -155,19 +153,7 @@ Use the monorepo structure below.
 /apps/web
 ```
 
-Next.js App Router, Tailwind CSS, TanStack Query, Zustand.
-
-```text
-/apps/api
-```
-
-NestJS REST API, authentication, RBAC, tenant resolution, domain modules.
-
-```text
-/apps/worker
-```
-
-BullMQ jobs for notifications, reports, AI tasks, demand letters, reminders.
+Next.js App Router — full-stack application with API Routes for backend logic, Tailwind CSS, TanStack Query, Zustand. Handles both frontend UI and backend API (authentication, RBAC, tenant resolution, domain modules, background jobs via BullMQ).
 
 ```text
 /apps/mobile
@@ -486,7 +472,7 @@ Never edit an already-applied migration.
 Recommended structure:
 
 ```text
-/apps/api/src/modules/crm/
+/apps/web/src/modules/crm/
   crm.module.js
   controllers/
   services/

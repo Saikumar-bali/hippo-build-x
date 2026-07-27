@@ -12,15 +12,21 @@
     "clean": "rm -rf .next"
   },
   "dependencies": {
+    "@hippo/db": "workspace:*",
     "@hippo/shared": "workspace:*",
     "@hippo/rbac": "workspace:*",
+    "@hippo/notifications": "workspace:*",
+    "@hippo/ai": "workspace:*",
     "next": "^15.1.4",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "@tanstack/react-query": "^5.62.8",
     "zustand": "^5.0.2",
     "tailwindcss": "^4.0.0",
-    "@tailwindcss/postcss": "^4.0.0"
+    "@tailwindcss/postcss": "^4.0.0",
+    "jose": "^5.9.6",
+    "bullmq": "^5.31.0",
+    "ioredis": "^5.4.2"
   },
   "devDependencies": {
     "eslint": "^9.17.0",

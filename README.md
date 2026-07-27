@@ -1,16 +1,17 @@
 # Construction ERP
 
-Multi-tenant construction management platform built with a Git-centric, monorepo architecture.
+Multi-tenant construction management platform built with Next.js as a full-stack application.
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| **Web Frontend** | Next.js (App Router), Tailwind CSS, TanStack Query, Zustand |
-| **API** | NestJS, REST, Swagger |
-| **Worker** | BullMQ, Redis |
+| **Full-Stack** | Next.js (App Router) — frontend UI + backend API routes |
+| **Styling** | Tailwind CSS |
+| **State** | TanStack Query, Zustand |
 | **Mobile** | Flutter, Riverpod, GoRouter |
 | **Database** | PostgreSQL, Drizzle ORM |
+| **Background Jobs** | BullMQ + Redis |
 | **Notifications** | Email, SMS, WhatsApp adapters |
 | **AI** | Provider-agnostic abstraction with guardrails |
 
@@ -19,9 +20,7 @@ Multi-tenant construction management platform built with a Git-centric, monorepo
 ```
 hippo-build-ex/
 ├── apps/
-│   ├── web/          # Next.js App Router
-│   ├── api/          # NestJS REST API
-│   ├── worker/       # BullMQ background jobs
+│   ├── web/          # Next.js full-stack (UI + API routes)
 │   └── mobile/       # Flutter mobile app
 ├── packages/
 │   ├── db/           # Drizzle schemas, migrations, tenant provisioning
@@ -51,30 +50,28 @@ pnpm install
 
 ### Environment Setup
 
-Create `.env` files in each app directory:
+Create `.env.local` in `apps/web/`:
 
 ```bash
-# apps/api/.env
+# Database
 DATABASE_URL=postgres://user:pass@localhost:5432/hippo
-REDIS_URL=redis://localhost:6379
-CORS_ORIGIN=http://localhost:3000
-PORT=3001
 
-# apps/worker/.env
-DATABASE_URL=postgres://user:pass@localhost:5432/hippo
+# Redis (for background jobs)
 REDIS_URL=redis://localhost:6379
+
+# Auth
+JWT_SECRET=your-secret-here
+JWT_REFRESH_SECRET=your-refresh-secret-here
+
+# CORS
+CORS_ORIGIN=http://localhost:3000
 ```
 
 ### Development
 
 ```bash
-# Start all apps
-pnpm dev
-
-# Start specific app
-pnpm --filter @hippo/api dev
+# Start Next.js (frontend + backend)
 pnpm --filter @hippo/web dev
-pnpm --filter @hippo/worker dev
 
 # Mobile
 cd apps/mobile && flutter run
@@ -93,15 +90,26 @@ pnpm --filter @hippo/db db:push
 pnpm --filter @hippo/db db:studio
 ```
 
+### API Routes
+
+All backend logic lives in Next.js API routes:
+
+```
+/api/health          # Health check
+/api/health/ready    # Readiness check
+/api/auth/login      # Login
+/api/auth/logout     # Logout
+/api/auth/me         # Current user
+/api/auth/reset-password
+/api/crm/leads       # CRM leads CRUD
+/api/crm/leads/[id]  # Single lead
+```
+
 ### Testing
 
 ```bash
 # Run all tests
 pnpm test
-
-# Run specific app tests
-pnpm --filter @hippo/api test
-pnpm --filter @hippo/web test
 
 # Lint
 pnpm lint
@@ -113,6 +121,7 @@ pnpm format:check
 ## Architecture
 
 - **Multi-tenant**: Each tenant gets an isolated PostgreSQL schema
+- **Full-stack Next.js**: Frontend and backend in one app, API routes for server logic
 - **Monorepo**: pnpm workspaces + Turborepo for fast builds
 - **Git-centric**: Trunk-based development, short-lived feature branches
 - **Module ownership**: Every module has named owners for backend, frontend, QA, and security
