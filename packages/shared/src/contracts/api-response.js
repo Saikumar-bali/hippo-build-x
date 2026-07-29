@@ -1,25 +1,41 @@
 /**
  * Standard API response envelope used across all endpoints.
  */
-export function successResponse(data, meta) {
+
+/**
+ * @param {unknown} data
+ * @param {object} [meta]
+ * @param {string} [requestId]
+ */
+export function successResponse(data, meta = {}, requestId) {
   return {
     success: true,
     data,
+    errors: null,
     meta: {
-      requestId: crypto.randomUUID(),
+      requestId: requestId || crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       ...meta,
     },
   };
 }
 
-export function errorResponse(errors, meta) {
+/**
+ * @param {Array<{ code: string, message: string, details?: unknown }>|string} errors
+ * @param {object} [meta]
+ * @param {string} [requestId]
+ */
+export function errorResponse(errors, meta = {}, requestId) {
+  const normalized = Array.isArray(errors)
+    ? errors
+    : [{ code: 'INTERNAL_ERROR', message: String(errors) }];
+
   return {
     success: false,
     data: null,
-    errors,
+    errors: normalized,
     meta: {
-      requestId: crypto.randomUUID(),
+      requestId: requestId || crypto.randomUUID(),
       timestamp: new Date().toISOString(),
       ...meta,
     },

@@ -806,6 +806,7 @@ A backend-only implementation is not considered complete when the module require
 - Re-running migrations is safe.
 - CI is required before merging.
 - Seed data creates a working demo tenant.
+- Super Admin **provision** path works (platform create tenant + retry). Suspend/plans/health ops are **not** required yet (Phase 12).
 
 ---
 
@@ -823,6 +824,7 @@ A backend-only implementation is not considered complete when the module require
 - Rate limiting
 - Secure cookie strategy for web
 - Secure token storage strategy for mobile
+- **Platform super-admin login** (`platform_users`, JWT `scope=platform`)
 
 ## RBAC workstream
 
@@ -842,10 +844,17 @@ A backend-only implementation is not considered complete when the module require
 - Branding
 - Users
 - Roles
-- Feature flags
+- Feature flags (**tenant-owned**)
 - Notification channel configuration
-- Tenant health
+- Tenant health (tenant-local)
 - Channel test actions
+
+## Platform administration workstream (Phase 1 slice)
+
+- Seeded platform super admin
+- Platform login / logout / me
+- Authenticated create/list tenants UI
+- Explicitly **deferred to Phase 12**: suspend/resume, forced kill-switches, plans/subscriptions, cross-tenant ops health, export/delete
 
 ## Audit workstream
 
@@ -864,6 +873,7 @@ A backend-only implementation is not considered complete when the module require
 - Four-axis permission checks work.
 - Auditor cannot perform writes.
 - Tenant admin can manage users and roles.
+- Platform super admin can sign in and create tenants.
 - Every state-changing endpoint creates an audit record.
 
 ---
@@ -1318,7 +1328,7 @@ Employee and Site Engineer workflows should support:
 
 ---
 
-# Phase 12 — Hardening and Production Release
+# Phase 12 — Hardening, Platform Ops, and Production Release
 
 ## Workstreams
 
@@ -1337,6 +1347,13 @@ Employee and Site Engineer workflows should support:
 - Full seed demo
 - Production deployment
 - Rollback rehearsal
+- **Platform Ops (Super Admin — PRD §3 / Blueprint Phase 12):**
+  - Suspend / resume tenant
+  - Platform-forced module kill-switches
+  - Plans and subscriptions
+  - Cross-tenant health / ops views
+  - Force revoke all tenant sessions
+  - Tenant export / soft-delete / purge
 
 ## Production readiness checks
 
@@ -1351,6 +1368,10 @@ Employee and Site Engineer workflows should support:
 - Error tracking enabled
 - Audit log retention configured
 - Production smoke tests automated
+- Suspended tenant cannot authenticate
+- Platform-forced flags override tenant settings
+- Plan/subscription assignment audited
+- Export/delete runbook verified
 
 ---
 

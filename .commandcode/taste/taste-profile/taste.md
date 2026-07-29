@@ -1,0 +1,16 @@
+# Taste Profile
+- Prefers Next.js (App Router) for web frontends; explicitly avoids MUI/Material UI. Confidence: 0.8
+- Prefers Ant Design 5 (antd) as the UI component library — explicitly chose it to replace Tailwind CSS. Uses @ant-design/icons, @ant-design/nextjs-registry, and ConfigProvider for theming. Confidence: 0.9
+- Prefers Flutter for mobile app development. Confidence: 0.75
+- Prefers Next.js as a full-stack framework (frontend + API routes for backend) over separate backend services like NestJS. Explicitly rejected a multi-app backend when told about it. Confidence: 0.85
+- Prefers BullMQ + Redis for background job processing. Confidence: 0.7
+- ~~Prefers Drizzle ORM for database access.~~ **Prefers raw SQL with pg (node-postgres) over ORM abstraction** — explicitly replaced Drizzle ORM in the PRD with direct SQL queries. Confidence: 0.85
+- Prefers pnpm workspaces + Turborepo for monorepo tooling. Confidence: 0.8
+- Prefers monorepo architecture for multi-application projects (explicitly asked for monorepo base). Confidence: 0.8
+- Values thorough foundational scaffolding — wants a comprehensive project base (tooling, configs, CI/CD, shared packages, docs) set up before building features. Confidence: 0.7
+- Prefers plain JavaScript (ES modules) over TypeScript — explicitly rejects TypeScript for the entire project. Confidence: 0.9
+- Expects documentation files (markdown plans, specs) to be kept in sync with code changes — will explicitly ask for both to be updated together. Confidence: 0.8
+- Wants architectural decisions and assessments captured in docs files — when given useful analysis, expects it saved into permanent documentation. Confidence: 0.7
+- Gives very terse, direct instructions — states what to do without elaboration or pleasantries. Confidence: 0.75
+- Prefers fewer services / simpler deployment — chose to consolidate API and worker logic into the Next.js app rather than maintaining separate backend services. Confidence: 0.75
+- Wants to understand complete end-to-end scenarios with concrete examples before starting implementation — thinks in terms of full user journeys and holistic flows, not isolated features or tasks. Confidence: 0.75

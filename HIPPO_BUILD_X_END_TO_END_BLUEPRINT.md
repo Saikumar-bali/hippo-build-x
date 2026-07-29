@@ -27,7 +27,7 @@ The core differentiator is the deterministic chain from approved construction pr
 | Phase | Scope | Required proof |
 |---:|---|---|
 | 0 | Foundation and Architecture Stabilization | One tenant can be provisioned end to end without manual SQL, and the isolation suite blocks merges. |
-| 1 | Identity, Sessions, RBAC and Tenant Administration | All protected APIs use real authentication and permission enforcement; every write produces an audit record. |
+| 1 | Identity, Sessions, RBAC, Tenant Admin + Platform login | All protected APIs use real auth; tenant admin works; platform super admin can sign in and create tenants. |
 | 2 | Property, Projects and Planning | A real project can be fully represented, and its unit availability can safely support bookings. |
 | 3 | CRM, Bookings and Customer Conversion | A lead can become a booked customer with agreement, KYC, portal identity and payment plan. |
 | 4 | Construction Progress and Notification Core | Approved site progress updates customer-visible data and emits one reliable event for downstream billing. |
@@ -38,7 +38,23 @@ The core differentiator is the deterministic chain from approved construction pr
 | 9 | AI Copilot and Grounded Customer Chatbot | AI is useful and traceable but technically unable to approve, post or mutate controlled business records. |
 | 10 | HRMS | Attendance, leave and payroll work from capture to locked payslip with audit evidence. |
 | 11 | Flutter Mobile Application | All four role experiences work against production-compatible APIs, including flaky-connection scenarios. |
-| 12 | Hardening, Observability and Production Launch | Production monitoring, security controls, recovery evidence and launch gates are complete. |
+| 12 | Hardening, Platform Ops, Observability and Production Launch | Production monitoring, **platform tenant lifecycle/ops/plans**, security, recovery and launch gates are complete. |
+
+### Super Admin capability → phase map (canonical; matches PRD §3)
+
+| Super Admin capability | Phase | Notes |
+|---|---|---|
+| Provision tenant (create schema, seed admin) | **0** | Platform APIs; may use service key until Phase 1 login |
+| Platform super-admin login + create/list tenants UI | **1** | Control-plane `platform_users`; JWT `scope=platform` |
+| Tenant-owned feature flags / branding / channels | **1** | Configured by **Tenant Admin**, not forced by platform |
+| Suspend / resume tenant (full pause) | **12** | Blocks all tenant logins and tenant APIs |
+| Platform-forced module kill-switches | **12** | Overrides tenant feature flags |
+| Manage plans & subscriptions | **12** | Control-plane `plans` / `subscriptions` |
+| Monitor cross-tenant health & ops views | **12** | Queue, errors, provisioning, readiness per tenant |
+| Tenant export / soft-delete / purge processes | **12** | Legal hold, offboarding, verified deletion |
+| Force revoke all tenant sessions | **12** | Incident response |
+
+> Rule: PRD Super Admin jobs that are not listed under Phase 0 or 1 **must** ship in Phase 12. Do not invent an unscheduled Phase 1b unless DEC supersedes this map.
 
 ## Phase 0 — Foundation and Architecture Stabilization
 
@@ -47,12 +63,16 @@ The core differentiator is the deterministic chain from approved construction pr
 ### Deliverables
 - Supersede conflicting architecture documents and record one canonical decision in docs/DECISIONS.md.
 - Restore CI and add PostgreSQL/Redis test services.
-- Create the control-plane schema and versioned tenant-schema migrations.
-- Implement tenant provisioning, retry and rollback/forward-fix paths.
+- Create the control-plane schema and versioned tenant-schema migrations (include `tenants` with lifecycle statuses `provisioning|active|failed|suspended`, and stubs/columns reserved for later `platform_users`, `plans`, `subscriptions`, `feature_flags`).
+- Implement tenant provisioning, retry and rollback/forward-fix paths (**Super Admin: provision tenants**).
 - Create request-scoped tenant context and prohibit global business queries.
 - Add standard response envelopes, errors, correlation IDs and structured logging.
 - Add real health/readiness probes and a demonstration seed tenant.
 - Add mandatory cross-tenant isolation tests.
+
+### Explicitly out of Phase 0
+- Platform super-admin password login UI (Phase 1).
+- Suspend/resume, plans/subscriptions, forced module flags, export/deletion (Phase 12).
 
 ### Core endpoints
 ```text
@@ -83,17 +103,21 @@ One tenant can be provisioned end to end without manual SQL, and the isolation s
 
 ## Phase 1 — Identity, Sessions, RBAC and Tenant Administration
 
-**Goal:** Replace demonstration tokens with secure identity and enforce tenant, role, project and location access.
+**Goal:** Replace demonstration tokens with secure identity; enforce tenant, role, project and location access; enable authenticated platform super-admin provisioning.
 
 ### Deliverables
-- Password login with Argon2id hashes.
+- Password login with Argon2id hashes (tenant users + **platform super admin**).
 - Short-lived access tokens and rotating refresh tokens.
 - HttpOnly secure cookies for web and secure storage for Flutter.
-- Session revocation, logout, account suspension and password reset.
+- Session revocation, logout, account suspension and password reset (**user** suspension, not tenant suspension).
 - Four-axis RBAC and editable tenant permission matrix.
 - User project/location assignments.
-- Tenant branding, feature flags and encrypted channel configuration.
+- Tenant branding, **tenant-owned** feature flags and encrypted channel configuration.
+- Seeded `platform_users` super admin; platform login; authenticated create/list tenants.
 - Audit interceptor for every state-changing API.
+
+### Explicitly out of Phase 1
+- Suspend/resume tenant, platform-forced kill-switches, plans/subscriptions, cross-tenant health ops, export/deletion (**Phase 12**).
 
 ### Core endpoints
 ```text
@@ -103,16 +127,22 @@ POST /api/v1/auth/logout
 GET /api/v1/auth/me
 POST /api/v1/auth/forgot-password
 POST /api/v1/auth/reset-password
+POST /api/v1/platform/auth/login
+GET /api/v1/platform/auth/me
+POST /api/v1/platform/auth/logout
+GET|POST /api/v1/platform/tenants
 GET|POST /api/v1/admin/users
 GET|POST /api/v1/admin/roles
 GET|PATCH /api/v1/admin/branding
 GET|PATCH /api/v1/admin/channel-config
+GET /api/v1/admin/audit
 ```
 
 ### End-to-end scenario
-1. Tenant admin creates Meera as a site engineer.
-2. Meera is assigned only to Green Valley Residency and Tower A.
-3. Meera can submit Tower A progress but cannot approve her own update, view finance or access another project.
+1. Platform super admin signs in and (if needed) creates Green Valley Developers.
+2. Tenant admin creates Meera as a site engineer.
+3. Meera is assigned only to Green Valley Residency and Tower A.
+4. Meera can submit Tower A progress but cannot approve her own update, view finance or access another project.
 
 ### Mandatory tests
 - Invalid password fails without leaking account existence.
@@ -120,9 +150,10 @@ GET|PATCH /api/v1/admin/channel-config
 - A rotated refresh token cannot be reused.
 - Auditor write requests are denied.
 - Project and location scopes affect records and dashboards.
+- Platform routes reject unauthenticated callers; platform login can create a tenant.
 
 ### Exit gate
-All protected APIs use real authentication and permission enforcement; every write produces an audit record.
+All protected APIs use real authentication and permission enforcement; every write produces an audit record; platform super admin can sign in and provision tenants.
 
 ## Phase 2 — Property, Projects and Planning
 
@@ -540,9 +571,9 @@ Uses the same /api/v1 endpoints as web; no separate mobile-only business API.
 ### Exit gate
 All four role experiences work against production-compatible APIs, including flaky-connection scenarios.
 
-## Phase 12 — Hardening, Observability and Production Launch
+## Phase 12 — Hardening, Platform Ops, Observability and Production Launch
 
-**Goal:** Move from feature-complete to operationally safe, supportable and recoverable.
+**Goal:** Move from feature-complete to operationally safe, supportable and recoverable — including the remaining **Super Admin** control-plane jobs from the PRD.
 
 ### Deliverables
 - Staging and production CI/CD with manual production approval.
@@ -551,27 +582,48 @@ All four role experiences work against production-compatible APIs, including fla
 - Structured logs, tracing, error tracking and queue dashboards.
 - WAF/rate limiting, dependency, secret and security scans.
 - Load tests, index/query-plan review and performance budgets.
-- Tenant export/deletion processes and operations views.
+- **Platform Ops (Super Admin — aligns with PRD §3):**
+  - Suspend / resume tenant (full service pause; rejects tenant auth when `status=suspended`)
+  - Platform-forced module kill-switches (override tenant feature flags)
+  - Plans and subscriptions CRUD + assign plan to tenant
+  - Cross-tenant health / ops views (provisioning, queues, error rates)
+  - Force revoke all sessions for a tenant
+  - Tenant export and soft-delete / purge processes with audit evidence
 - Production launch checklist and support documentation.
 
 ### Core endpoints
 ```text
 Health/readiness, worker heartbeat, WebSocket heartbeat and protected operational status endpoints.
+PATCH /api/v1/platform/tenants/:id/status          # active | suspended
+PATCH /api/v1/platform/tenants/:id/feature-flags  # platform-forced flags
+GET|POST|PATCH /api/v1/platform/plans
+GET|POST|PATCH /api/v1/platform/subscriptions
+GET /api/v1/platform/tenants/:id/health
+POST /api/v1/platform/tenants/:id/revoke-sessions
+POST /api/v1/platform/tenants/:id/export
+POST /api/v1/platform/tenants/:id/delete
 ```
 
 ### End-to-end scenario
 1. A release backs up data, validates migrations, deploys compatible workers, applies migrations, deploys web/API and runs smoke tests.
 2. Alerts monitor error rates, failed jobs, queue backlog and notification failures.
 3. A restore drill proves recovery.
+4. Super admin suspends a delinquent tenant → tenant logins fail → resume restores access.
+5. Super admin forces `payments=false` for a tenant under incident response; tenant admin cannot re-enable until platform clears the override.
+6. Super admin assigns a plan/subscription and exports then soft-deletes a departing tenant with audited evidence.
 
 ### Mandatory tests
 - Isolation, payment idempotency, inventory atomicity, auth rotation and audit completeness suites are mandatory.
 - Staging E2E passes before production approval.
 - Backup restore is verified.
 - No critical dependency vulnerabilities remain.
+- Suspended tenant cannot authenticate or call tenant APIs.
+- Platform-forced flags override tenant settings.
+- Plan/subscription assignment is auditable.
+- Export/delete leaves no active schema leakage across tenants.
 
 ### Exit gate
-Production monitoring, security controls, recovery evidence and launch gates are complete.
+Production monitoring, security controls, recovery evidence, **complete Super Admin platform ops**, and launch gates are complete.
 
 ## Cross-cutting implementation standards
 ### Tenant request context

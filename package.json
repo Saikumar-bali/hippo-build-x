@@ -13,6 +13,9 @@
     "format:check": "prettier --check \"**/*.{js,jsx,json,md}\"",
     "test": "turbo test",
     "test:e2e": "turbo test:e2e",
+    "test:e2e:phase0": "node scripts/e2e-phase0.js",
+    "test:e2e:phase1": "node scripts/e2e-phase1.js",
+    "test:e2e:phase2": "node scripts/e2e-phase2.js",
     "clean": "turbo clean"
   },
   "devDependencies": {

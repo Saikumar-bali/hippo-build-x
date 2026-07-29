@@ -1,40 +1,53 @@
 /**
  * Resolve the data scope filter based on the user's assignments.
- * This determines what data a user can see/modify.
  */
 export function resolveScope(ctx) {
-  // Admin users see everything
-  if (ctx.roles.includes('admin')) {
-    return { type: 'global', field: '', value: null };
+  const roles = (ctx.roles || []).map((r) => String(r).toLowerCase());
+  if (roles.includes('administrator') || roles.includes('admin')) {
+    return { type: 'global', projectIds: null, locationIds: null };
   }
 
-  // If user is assigned to a specific project, scope to that project
-  if (ctx.projectId) {
-    return { type: 'project', field: 'project_id', value: ctx.projectId };
+  const projectIds = ctx.projectIds || [];
+  const locationIds = ctx.locationIds || [];
+
+  if (projectIds.length || locationIds.length) {
+    return { type: 'scoped', projectIds, locationIds };
   }
 
-  // If user is assigned to a specific location, scope to that location
-  if (ctx.locationId) {
-    return { type: 'location', field: 'location_id', value: ctx.locationId };
-  }
-
-  // Default: scope to own data only
   return { type: 'own', field: 'created_by', value: ctx.userId };
 }
 
 /**
- * Check if the user can access a specific record based on scope.
+ * @param {object} ctx
+ * @param {{ project_id?: string, location_id?: string, created_by?: string }} record
  */
 export function canAccessRecord(ctx, record) {
   const scope = resolveScope(ctx);
+  if (scope.type === 'global') return true;
 
-  if (scope.type === 'global') {
+  if (scope.type === 'scoped') {
+    if (record.project_id && scope.projectIds?.length) {
+      if (!scope.projectIds.includes(record.project_id)) return false;
+    }
+    if (record.location_id && scope.locationIds?.length) {
+      if (!scope.locationIds.includes(record.location_id)) return false;
+    }
     return true;
   }
 
-  if (scope.field && scope.value) {
-    return record[scope.field] === scope.value;
+  if (scope.type === 'own') {
+    return record.created_by === scope.value;
   }
 
   return false;
+}
+
+/**
+ * Assert user can access a project id.
+ */
+export function enforceProjectAccess(ctx, projectId) {
+  const scope = resolveScope(ctx);
+  if (scope.type === 'global') return;
+  if (scope.type === 'scoped' && scope.projectIds?.includes(projectId)) return;
+  throw new Error(`No access to project ${projectId}`);
 }

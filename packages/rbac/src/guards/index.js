@@ -1,43 +1,56 @@
 import { Permission } from '../permissions/index.js';
+import { AppError, ErrorCode } from '@hippo/shared';
 
 /**
- * Check if the tenant context has the required permission.
+ * @param {{ permissions?: string[], roles?: string[] }} ctx
+ * @param {string} permission
  */
 export function checkPermission(ctx, permission) {
-  if (ctx.permissions.includes(permission)) {
+  const perms = ctx.permissions || [];
+  if (perms.includes('*') || perms.includes(permission)) {
     return { allowed: true };
   }
   return { allowed: false, reason: `Missing permission: ${permission}` };
 }
 
-/**
- * Check if the tenant context has ANY of the required permissions.
- */
 export function checkAnyPermission(ctx, permissions) {
-  const hasAny = permissions.some((p) => ctx.permissions.includes(p));
-  if (hasAny) {
-    return { allowed: true };
-  }
+  const hasAny = permissions.some((p) => checkPermission(ctx, p).allowed);
+  if (hasAny) return { allowed: true };
   return { allowed: false, reason: `Missing any of permissions: ${permissions.join(', ')}` };
 }
 
-/**
- * Check if the tenant context has ALL of the required permissions.
- */
 export function checkAllPermissions(ctx, permissions) {
-  const missing = permissions.filter((p) => !ctx.permissions.includes(p));
-  if (missing.length === 0) {
-    return { allowed: true };
-  }
+  const missing = permissions.filter((p) => !checkPermission(ctx, p).allowed);
+  if (missing.length === 0) return { allowed: true };
   return { allowed: false, reason: `Missing permissions: ${missing.join(', ')}` };
 }
 
-/**
- * Enforce a permission, throwing if not allowed.
- */
 export function enforcePermission(ctx, permission) {
   const result = checkPermission(ctx, permission);
   if (!result.allowed) {
-    throw new Error(result.reason);
+    throw new AppError(ErrorCode.INSUFFICIENT_PERMISSION, result.reason, 403);
   }
 }
+
+/**
+ * Auditor role is read-only for mutating HTTP methods.
+ */
+export function enforceNotAuditorWrite(ctx, method) {
+  const roles = ctx.roles || [];
+  const isAuditorOnly =
+    roles.includes('Auditor') && !roles.includes('Administrator') && !roles.includes('admin');
+  // Also check role key style
+  const auditor =
+    roles.some((r) => String(r).toLowerCase() === 'auditor') &&
+    !roles.some((r) => ['administrator', 'admin'].includes(String(r).toLowerCase()));
+
+  if ((isAuditorOnly || auditor) && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+    throw new AppError(ErrorCode.FORBIDDEN, 'Auditor cannot perform write operations', 403);
+  }
+}
+
+export function hasPermission(ctx, permission) {
+  return checkPermission(ctx, permission).allowed;
+}
+
+export { Permission };

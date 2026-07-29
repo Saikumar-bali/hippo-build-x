@@ -13,7 +13,8 @@
       "dependsOn": []
     },
     "test": {
-      "dependsOn": ["^build"]
+      "dependsOn": [],
+      "env": ["DATABASE_URL", "REDIS_URL", "JWT_SECRET", "JWT_REFRESH_SECRET", "NODE_ENV"]
     },
     "test:e2e": {
       "dependsOn": ["build"]

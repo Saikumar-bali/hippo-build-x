@@ -1,31 +1,29 @@
-import { query } from '@/lib/db';
-import { successResponse, errorResponse, getTenantContext } from '@/lib/api-utils';
+import { successResponse, withApiHandler, tenantSql } from '@/lib/api-utils';
+import { requireAuthContext } from '@/lib/tenant-context.js';
+import { Permission } from '@hippo/rbac';
+import { filterProjectsByScope } from '@/modules/projects/property-service.js';
 
-export async function GET(request) {
-  try {
-    const { tenantId } = await getTenantContext(request);
-    const { searchParams } = new URL(request.url);
-    const projectId = searchParams.get('projectId');
-    const tower = searchParams.get('tower');
-    const status = searchParams.get('status');
-
-    let sql = `
-      SELECT u.*, p.name as project_name, p.code as project_code
-      FROM units u
-      JOIN projects p ON u.project_id = p.id AND p.deleted_at IS NULL
-      WHERE u.tenant_id = $1 AND u.deleted_at IS NULL
-    `;
-    const params = [tenantId];
-    let idx = 2;
-
-    if (projectId) { sql += ` AND u.project_id = $${idx++}`; params.push(projectId); }
-    if (tower) { sql += ` AND u.tower = $${idx++}`; params.push(tower); }
-    if (status) { sql += ` AND u.status = $${idx++}`; params.push(status); }
-
-    sql += ' ORDER BY u.tower, u.floor, u.unit_number';
-    const units = await query(sql, params);
-    return successResponse(units);
-  } catch (error) {
-    return errorResponse(error.message);
-  }
-}
+/** List units across accessible projects (legacy list endpoint). */
+export const GET = withApiHandler(
+  { auth: true, permission: Permission.UNIT_READ },
+  async () => {
+    const ctx = requireAuthContext();
+    const sql = tenantSql();
+    const projects = await sql.unsafe(
+      `SELECT id, created_by FROM projects WHERE deleted_at IS NULL`,
+    );
+    const allowed = filterProjectsByScope(ctx, projects).map((p) => p.id);
+    if (!allowed.length) return successResponse([]);
+    const rows = await sql.unsafe(
+      `SELECT u.*, t.code as tower_code, f.floor_number
+       FROM units u
+       JOIN towers t ON t.id = u.tower_id
+       JOIN floors f ON f.id = u.floor_id
+       WHERE u.deleted_at IS NULL AND u.project_id = ANY($1::uuid[])
+       ORDER BY u.created_at DESC
+       LIMIT 500`,
+      [allowed],
+    );
+    return successResponse(rows);
+  },
+);

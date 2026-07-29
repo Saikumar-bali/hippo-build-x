@@ -10,11 +10,17 @@
     "./enums": "./src/enums/index.js",
     "./errors": "./src/errors/index.js",
     "./events": "./src/events/index.js",
-    "./validation": "./src/validation/index.js"
+    "./validation": "./src/validation/index.js",
+    "./logging": "./src/logging/index.js",
+    "./env": "./src/env.js",
+    "./crypto": "./src/crypto/password.js"
   },
   "scripts": {
     "lint": "eslint src",
     "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "hash-wasm": "^4.11.0"
   },
   "devDependencies": {
     "eslint": "^9.17.0"

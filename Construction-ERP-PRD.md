@@ -55,22 +55,36 @@ In scope: Tenant/User/RBAC control plane · CRM · HRMS · Property & Project st
 
 ## 3. Personas & roles
 
-| Role | Scope | Primary jobs |
-|---|---|---|
-| Super Admin | Platform (control plane) | Provision tenants, monitor health, manage plans |
-| Tenant Admin | One tenant | Configure branding, users, roles, channels, projects |
-| Project Manager | Project(s) | Planning, progress sign-off, budget, risk |
-| Sales Manager / CRM Executive | Tenant / assigned leads | Pipeline, follow-ups, bookings |
-| Procurement / Purchase | Tenant | RFQ, PO, vendor management |
-| Store / Inventory | Warehouse(s) | GRN, issue, stock, transfers |
-| Finance | Tenant | AR/AP, invoices, receipts, reconciliation |
-| HR | Tenant | Employees, attendance, payroll, leave |
-| Site Engineer | Assigned units/activities | Progress updates, checklists, inspections |
-| Customer | Their unit(s) | Timeline, payments due, documents, support |
-| Vendor / Contractor | Their POs / work | (Portal-lite, P1) quotations, delivery status |
-| Auditor | Tenant (read-only) | Read-only access to records and trails |
+| Role | Scope | Primary jobs | Ships in |
+|---|---|---|---|
+| Super Admin | Platform (control plane) | See capability map below | Phases **0**, **1**, **12** |
+| Tenant Admin | One tenant | Configure branding, users, roles, channels, projects | **Phase 1** |
+| Project Manager | Project(s) | Planning, progress sign-off, budget, risk | Phases **2+** |
+| Sales Manager / CRM Executive | Tenant / assigned leads | Pipeline, follow-ups, bookings | **Phase 3** |
+| Procurement / Purchase | Tenant | RFQ, PO, vendor management | **Phase 6** |
+| Store / Inventory | Warehouse(s) | GRN, issue, stock, transfers | **Phase 6** |
+| Finance | Tenant | AR/AP, invoices, receipts, reconciliation | **Phase 7** |
+| HR | Tenant | Employees, attendance, payroll, leave | **Phase 10** |
+| Site Engineer | Assigned units/activities | Progress updates, checklists, inspections | Phases **1** (identity) / **4** (progress) |
+| Customer | Their unit(s) | Timeline, payments due, documents, support | **Phase 5** |
+| Vendor / Contractor | Their POs / work | (Portal-lite, P1) quotations, delivery status | **Phase 6** |
+| Auditor | Tenant (read-only) | Read-only access to records and trails | **Phase 1** |
 
 Permissions are enforced along four axes: **role-based, module-based, project-based, location-based** (§6).
+
+### 3.1 Super Admin capability map (aligned with Blueprint)
+
+| Capability | Phase | Definition of done |
+|---|---|---|
+| Provision tenants | **0** | `POST /api/v1/platform/tenants` creates schema, runs migrations, seeds admin; retry/idempotent |
+| Platform login + authenticated create/list | **1** | Seeded `platform_users`; `/platform/login`; JWT `scope=platform` required for platform tenant APIs |
+| Suspend / resume tenant | **12** | Status `suspended` blocks all tenant auth and tenant APIs; resume restores `active` |
+| Platform-forced module kill-switches | **12** | Platform flags override tenant feature flags |
+| Manage plans & subscriptions | **12** | Control-plane `plans` / `subscriptions` CRUD + assign to tenant |
+| Monitor health | **12** | Per-tenant ops/health views (provisioning, queues, errors) |
+| Tenant export / deletion | **12** | Audited export + soft-delete/purge runbooks |
+
+> Canonical sequencing lives in `HIPPO_BUILD_X_END_TO_END_BLUEPRINT.md` (Super Admin capability → phase map) and `docs/DECISIONS.md` DEC-009. If this table and the Blueprint disagree, **update both in the same PR**.
 
 ---
 
@@ -148,6 +162,7 @@ Honoring the stack in the source brief, with concrete framework choices made for
 ### 5.1 Control plane vs tenant schemas
 
 - `control_plane` schema (one, shared): `tenants`, `platform_users` (super admins), `plans`, `subscriptions`, `provisioning_jobs`, `tenant_channels` (encrypted per-tenant channel creds), `feature_flags`.
+  - **Phase ownership (DEC-009):** `tenants` + provisioning in Phase 0; `platform_users` auth in Phase 1; `plans` / `subscriptions` / platform-forced flags / suspend lifecycle ops in Phase 12. Tenant-owned flags also live in tenant `tenant_settings` (Phase 1).
 - `tenant_<tenantId>` schema (one per tenant): all business tables — users, roles, leads, projects, units, materials, POs, invoices, etc.
 
 ### 5.2 Tenant resolution (request lifecycle)
@@ -563,8 +578,8 @@ Monorepo (pnpm workspaces + Turborepo):
 
 Build in this order. Each phase ends with a PR that lists migrations, new endpoints, tests added, and updated `docs/`. **DoD = all P0 acceptance criteria for that phase's modules pass in CI, seed data demonstrates it, and the isolation suite is green.**
 
-- **Phase 0 — Foundations.** Monorepo, CI, Neon connection, control-plane + tenant schema scaffolding, tenant provisioning + migration runner, tenant resolver middleware, cross-tenant isolation test suite, ER diagram, `DECISIONS.md`. *DoD: provision a tenant end-to-end; isolation suite green.*
-- **Phase 1 — Identity, RBAC, Tenant Admin.** Auth (JWT + refresh), four-axis RBAC guards + scope resolvers, seeded permission matrix, Tenant Admin UI (users, roles, branding, channel config), audit interceptor.
+- **Phase 0 — Foundations.** Monorepo, CI, Neon connection, control-plane + tenant schema scaffolding (including lifecycle statuses and reserved control-plane entities), tenant provisioning + migration runner, tenant resolver middleware, cross-tenant isolation test suite, ER diagram, `DECISIONS.md`. *DoD: provision a tenant end-to-end; isolation suite green. Super Admin: provision only.*
+- **Phase 1 — Identity, RBAC, Tenant Admin + Platform login.** Auth (JWT + refresh), four-axis RBAC guards + scope resolvers, seeded permission matrix, Tenant Admin UI (users, roles, branding, channel config, tenant-owned feature flags), platform super-admin login + authenticated tenant create/list, audit interceptor. *DoD: protected APIs enforce auth; platform super admin can sign in and create tenants. Out of scope: suspend tenant, plans, forced flags, export (Phase 12).*
 - **Phase 2 — Property & Project structure + Planning-lite.** Project/tower/floor/unit tree + bulk generation, unit status history, milestones/tasks/Gantt, BOQ, drawings/RFI/issues.
 - **Phase 3 — CRM.** Pipeline state machine, lead ingestion adapters (≥3 sources), follow-ups + reminders, bookings, agreements, KYC (encrypted), convert-to-customer + portal provisioning.
 - **Phase 4 — Construction progress + Notifications core.** Activity templates, unit activities, checklists, photo upload, engineer approval, `progress.updated` event, `NotificationService` + all three channel adapters + consent + templates.
@@ -575,9 +590,9 @@ Build in this order. Each phase ends with a PR that lists migrations, new endpoi
 - **Phase 9 — AI Copilot (assist-only).** `AiService`, predictions/suggestions across CRM/construction/finance, grounded customer chatbot; guardrail tests.
 - **Phase 10 — HRMS.** Employee master, attendance (web + mobile), biometric import contract, leave, payroll, payslips, performance/training/documents.
 - **Phase 11 — Mobile (Flutter).** Employee, Site Engineer (offline-first), Sales, Customer apps against the same API.
-- **Phase 12 — Hardening.** Performance passes, observability, ops views for jobs, security review, full seed demo, docs finalization.
+- **Phase 12 — Hardening + Platform Ops.** Performance passes, observability, ops views for jobs, security review, full seed demo, docs finalization, **and remaining Super Admin jobs**: suspend/resume tenant, platform-forced module kill-switches, plans/subscriptions, cross-tenant health, force session revoke, tenant export/deletion. *DoD: matches Blueprint Phase 12 exit gate + Super Admin map in §3.1.*
 
-> **Sequencing rationale:** progress → notifications → payment engine (Phases 4–5) are ordered so the product's core differentiator is provable early, before the broader inventory/finance/HR breadth is filled in.
+> **Sequencing rationale:** progress → notifications → payment engine (Phases 4–5) are ordered so the product's core differentiator is provable early, before the broader inventory/finance/HR breadth is filled in. Super Admin commercial/ops controls are deferred to Phase 12 so Phases 0–1 stay focused on isolation and identity.
 
 ---
 
