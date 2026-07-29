@@ -1,4 +1,5 @@
 import { queryOne } from '@/lib/db';
+import { successResponse, errorResponse } from '@/lib/api-utils';
 
 export async function GET() {
   try {
@@ -10,13 +11,11 @@ export async function GET() {
         (SELECT COUNT(*) FROM units WHERE deleted_at IS NULL) as total_units,
         (SELECT COUNT(*) FROM units WHERE status = 'available' AND deleted_at IS NULL) as available_units,
         (SELECT COUNT(*) FROM units WHERE status = 'booked' AND deleted_at IS NULL) as booked_units,
-        (SELECT COUNT(*) FROM units WHERE status = 'sold' AND deleted_at IS NULL) as sold_units,
         (SELECT COUNT(*) FROM leads WHERE deleted_at IS NULL) as total_leads,
-        (SELECT COUNT(*) FROM leads WHERE status = 'new' AND deleted_at IS NULL) as new_leads,
-        (SELECT COUNT(*) FROM leads WHERE status = 'booked' AND deleted_at IS NULL) as booked_leads
+        (SELECT COUNT(*) FROM leads WHERE status = 'new' AND deleted_at IS NULL) as new_leads
     `);
-    return Response.json({ success: true, data: stats });
+    return successResponse(stats);
   } catch (error) {
-    return Response.json({ success: false, error: error.message }, { status: 500 });
+    return errorResponse(error.message);
   }
 }

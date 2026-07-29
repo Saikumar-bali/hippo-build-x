@@ -1,0 +1,19 @@
+{
+  "name": "@hippo/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/main.js",
+    "start": "node src/main.js",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "bullmq": "^5.31.0",
+    "ioredis": "^5.4.2",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "eslint": "^9.17.0"
+  }
+}

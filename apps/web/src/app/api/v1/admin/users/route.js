@@ -1,4 +1,5 @@
 import { query } from '@/lib/db';
+import { successResponse, errorResponse } from '@/lib/api-utils';
 
 export async function GET() {
   try {
@@ -11,8 +12,8 @@ export async function GET() {
       WHERE u.deleted_at IS NULL
       ORDER BY u.created_at DESC
     `);
-    return Response.json({ success: true, data: users });
+    return successResponse(users);
   } catch (error) {
-    return Response.json({ success: false, error: error.message }, { status: 500 });
+    return errorResponse(error.message);
   }
 }
