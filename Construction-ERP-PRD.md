@@ -80,55 +80,63 @@ Honoring the stack in the source brief, with concrete framework choices made for
 
 ### 4.1 Stack
 
-- **Web frontend [LOCKED]:** React 18 + TypeScript + **Vite**. UI library **Ant Design 5** (+ Ant Design ProComponents for tables/forms). Server state via **TanStack Query**; light client state via **Zustand**; routing via **React Router**. Charts via Ant Design Charts / Recharts.
-- **Backend [LOCKED framework: NestJS]:** Node.js + **NestJS** + TypeScript. NestJS is chosen over bare Express for first-class modules, dependency injection, guards/interceptors (ideal for the 4-axis RBAC), and pipes for validation. If the human prefers plain Express/Fastify, that is **[OPEN]** but the module boundaries in this doc still apply.
-- **ORM [LOCKED]:** **Drizzle ORM** with `postgres-js`. Drizzle's explicit SQL and multi-connection model fit schema-per-tenant cleanly.
-- **Database [LOCKED]:** **PostgreSQL on Neon**. **Schema-per-tenant** isolation (§5). A shared `control_plane` schema holds cross-tenant records (tenants, super-admin users, plans, provisioning jobs).
-- **Background jobs / queue [LOCKED]:** **BullMQ on Redis**. Used for notifications, demand-letter generation, AI tasks, report builds, scheduled reminders.
+- ~~**Web frontend [LOCKED]:** React 18 + TypeScript + **Vite**. UI library **Ant Design 5** (+ Ant Design ProComponents for tables/forms). Server state via **TanStack Query**; light client state via **Zustand**; routing via **React Router**. Charts via Ant Design Charts / Recharts.~~
+- **Web frontend [LOCKED]:** Next.js 15 (App Router) + JavaScript (no TypeScript). UI library **Ant Design 5** (+ Ant Design ProComponents for tables/forms). Client state via **Zustand**; routing via Next.js file-based routing. Charts via Ant Design Charts.
+- ~~**Backend [LOCKED framework: NestJS]:** Node.js + **NestJS** + TypeScript. NestJS is chosen over bare Express for first-class modules, dependency injection, guards/interceptors (ideal for the 4-axis RBAC), and pipes for validation. If the human prefers plain Express/Fastify, that is **[OPEN]** but the module boundaries in this doc still apply.~~
+- **Backend [LOCKED]:** Next.js API Routes (`/api/v1/*`). Full-stack monolith — frontend and backend in one deployment. Separate worker process for background jobs.
+- ~~**ORM [LOCKED]:** **Drizzle ORM** with `postgres-js`. Drizzle's explicit SQL and multi-connection model fit schema-per-tenant cleanly.~~
+- **Database access [LOCKED]:** **pg** (node-postgres) with raw SQL queries. Direct PostgreSQL access without ORM abstraction.
+- **Database [LOCKED]:** **PostgreSQL** (local or Neon). **Schema-per-tenant** isolation (§5). A shared `public` schema holds cross-tenant records (tenants, super-admin users, plans, provisioning jobs).
+- **Background jobs / queue [LOCKED]:** **BullMQ on Redis** (separate worker process). Used for notifications, demand-letter generation, AI tasks, report builds, scheduled reminders.
 - **Object storage [LOCKED]:** S3-compatible bucket, keyed per tenant (`s3://<bucket>/<tenantId>/...`). Signed URLs for access; no public buckets.
-- **Realtime [LOCKED]:** WebSocket gateway (Socket.IO via NestJS) for progress/notification push to portals and dashboards.
+- **Realtime [LOCKED]:** Standalone WebSocket server (ws/socket.io) or managed service (Pusher/Ably) for progress/notification push to portals and dashboards.
 - **AI [LOCKED]:** OpenAI (Agents/Responses API + function calling) behind an internal `AiService` abstraction so the provider can be swapped. See §9.
 - **Mobile [LOCKED]:** **Flutter** (single codebase, role-aware app shells: Employee, Site Engineer, Sales, Customer). Offline-first for Employee/Site Engineer (§12).
 - **Notifications [LOCKED]:** WhatsApp Business API (**Infobip or Meta Cloud API**, adapter pattern), Email (**Brevo**/SMTP), SMS (**Twilio** and **2Factor.in**). All credentials are **per-tenant** (§10).
 
 ### 4.2 Deployment topology **[OPEN — important]**
 
-The source brief says "deployed in Vercel." That is correct for the **web frontend** (static React SPA on Vercel). The **NestJS API + BullMQ workers + WebSocket gateway** are stateful/long-running and are **not** a good fit for Vercel serverless. Default decision:
-
-- **Web (React/Vite SPA):** Vercel.
-- **API + workers + WS:** a container host (Railway / Render / Fly.io / Fluid compute). Workers run as a separate process from the API.
-- **Postgres:** Neon. **Redis:** managed (Upstash/Redis Cloud). **Object store:** S3/R2.
-
-If the human insists on an all-Vercel deployment, the backend must be re-shaped to Next.js API routes + a separate hosted worker; record that pivot in `DECISIONS.md` before Phase 0.
+- ~~The source brief says "deployed in Vercel." That is correct for the **web frontend** (static React SPA on Vercel). The **NestJS API + BullMQ workers + WebSocket gateway** are stateful/long-running and are **not** a good fit for Vercel serverless. Default decision:~~
+- **Web + API (Next.js):** Vercel, Railway, or container. Next.js handles both frontend and API routes.
+- **Worker (BullMQ):** Separate process on same host or container host (Railway / Render / Fly.io).
+- **WebSocket server:** Standalone process or managed service (Pusher/Ably).
+- **Postgres:** Local or Neon. **Redis:** local or managed (Upstash/Redis Cloud). **Object store:** S3/R2.
 
 ### 4.3 High-level architecture
 
 ```
-                       ┌──────────────────────────────────────────┐
-   React SPA (Vercel)  │  Ant Design app: role-scoped dashboards   │
-   Flutter apps        │  + module UIs + customer/vendor portals   │
-        │              └──────────────────────────────────────────┘
-        │ HTTPS / WSS
-        ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  NestJS API (container)                                          │
-│  • AuthN (JWT) + AuthZ guards (role/module/project/location)    │
-│  • Tenant resolver middleware → per-request tenant DB context   │
+│  Next.js App (port 3000)                                        │
+│  • Frontend: Ant Design 5 + App Router                          │
+│  • Backend: API Routes (/api/v1/*)                              │
+│  • AuthN (JWT) + AuthZ middleware (role/module/project/location)│
+│  • Tenant resolver middleware → per-request DB context          │
 │  • Domain modules (CRM, HRMS, Projects, Inventory, ... )        │
-│  • AiService (assist-only)  • Notification adapters             │
 └───────────────┬─────────────────────────────┬───────────────────┘
-                │                             │ enqueue
+                │ queries                     │ enqueue
                 ▼                             ▼
      ┌────────────────────┐        ┌────────────────────────┐
-     │ Neon PostgreSQL     │        │ BullMQ workers (Redis) │
-     │ control_plane +     │        │ notifications, demand   │
-     │ tenant_<id> schemas │        │ letters, AI, reports    │
-     └────────────────────┘        └───────────┬────────────┘
+     │ PostgreSQL          │        │ Redis                  │
+     │ control_plane +     │        │ BullMQ queue           │
+     │ tenant_<id> schemas │        └───────────┬────────────┘
+     └────────────────────┘                     │
+                                       ┌────────▼────────┐
+                                       │ Worker Process   │
+                                       │ notifications,   │
+                                       │ demand letters,  │
+                                       │ AI, reports      │
+                                       └────────┬────────┘
                                                 │
                         ┌───────────────────────┼───────────────────────┐
                         ▼                       ▼                       ▼
                   WhatsApp adapter        Email (Brevo)           SMS (Twilio/2Factor)
                   (Infobip/Meta)                                  + OpenAI (AiService)
+
+   Flutter apps (Employee, Site Engineer, Sales, Customer)
+        │
+        │ HTTPS / WSS
+        ▼
+   Same /api/v1/* endpoints as web
 ```
 
 ---
@@ -168,11 +176,12 @@ If the human insists on an all-Vercel deployment, the backend must be re-shaped 
 
 - JWT access tokens (short-lived) + refresh tokens (rotating, revocable). Passwords hashed with Argon2id.
 - Customer and vendor portal logins are the same identity system, scoped by role. OTP login (via SMS/WhatsApp) allowed for Customer role.
-- *Note for [OPEN] full-stack variant:* if the app is rebuilt on Next.js, Better Auth is the preferred library; for the NestJS build, use Passport-JWT + a custom RBAC layer.
+- ~~*Note for [OPEN] full-stack variant:* if the app is rebuilt on Next.js, Better Auth is the preferred library; for the NestJS build, use Passport-JWT + a custom RBAC layer.~~
+- **Implementation:** Next.js middleware with `jose` JWT library + custom RBAC middleware.
 
 ### 6.2 AuthZ — four-axis model
 
-A permission check evaluates: **role** (what actions the role allows) ∧ **module** (feature enabled for tenant/plan) ∧ **project** (user assigned to project) ∧ **location** (user assigned to site/warehouse). Implemented as a NestJS guard `@RequirePermission('crm.lead.update')` + a scope resolver that checks project/location assignment on the target resource.
+A permission check evaluates: **role** (what actions the role allows) ∧ **module** (feature enabled for tenant/plan) ∧ **project** (user assigned to project) ∧ **location** (user assigned to site/warehouse). ~~Implemented as a NestJS guard `@RequirePermission('crm.lead.update')` + a scope resolver that checks project/location assignment on the target resource.~~ Implemented as Next.js middleware + a scope resolver function that checks project/location assignment on the target resource.
 
 - Permission matrix is data-driven (seeded per tenant, editable by Tenant Admin), not hardcoded in code paths.
 - Auditor role = read-only across granted modules; every write endpoint denies Auditor.
@@ -494,7 +503,8 @@ Four role experiences in one Flutter codebase:
 - Standard envelope: `{ data, meta }` on success; `{ error: { code, message, details } }` on failure. Consistent pagination (`page`, `pageSize`, `sort`, filter params) via ProComponents-compatible query contract.
 - Validation via DTOs; reject unknown fields. Idempotency keys required on demand-letter/receipt/PO-create style endpoints.
 - Domain events (`progress.updated`, `booking.created`, `payment.demanded`, etc.) published on an internal event bus that enqueues side-effects to BullMQ.
-- OpenAPI/Swagger generated and kept current; the SPA and Flutter apps consume a shared generated TypeScript/Dart client.
+- ~~OpenAPI/Swagger generated and kept current; the SPA and Flutter apps consume a shared generated TypeScript/Dart client.~~
+- REST API documented via Next.js Swagger integration; Flutter apps consume the same `/api/v1/*` endpoints.
 
 ---
 
@@ -517,30 +527,29 @@ Monorepo (pnpm workspaces + Turborepo):
 
 ```
 /apps
-  /web            # React + Vite + Ant Design SPA
-  /api            # NestJS API
-  /worker         # BullMQ workers (imports from /api domain libs)
+  /web            # Next.js App Router (frontend + API routes)
+  /worker         # BullMQ workers (separate process)
   /mobile         # Flutter (Employee/Engineer/Sales/Customer shells)
 /packages
-  /db             # Drizzle schema (control_plane + tenant), migrations, tenant migration runner
-  /shared         # DTOs, types, event contracts, generated API client
+  /db             # PostgreSQL schemas, migrations, tenant migration runner
+  /shared         # DTOs, types, event contracts, validation
   /ai             # AiService abstraction + provider adapters
   /notifications  # channel adapters (WhatsApp/Email/SMS) + templates
   /rbac           # permission matrix, guards, scope resolvers
 /docs
   data-model.md   # Mermaid ER diagram (kept current)
   DECISIONS.md    # every [OPEN] resolution + assumptions
-  api.md          # OpenAPI notes
+  api.md          # API documentation
 ```
 
 ---
 
 ## 14. Coding conventions for the agent **[LOCKED]**
 
-1. **TypeScript strict** everywhere; no `any` without a written justification comment.
-2. **Every module** = Nest module with controller + service + repository + DTOs + unit tests + e2e happy-path + seed data.
+1. ~~**TypeScript strict** everywhere; no `any` without a written justification comment.~~ **JavaScript** (ES modules) everywhere; no TypeScript. Use ESLint for code quality.
+2. ~~**Every module** = Nest module with controller + service + repository + DTOs + unit tests + e2e happy-path + seed data.~~ **Every module** = Next.js API route + service functions + SQL queries + unit tests + e2e happy-path + seed data.
 3. **Repositories** always take tenant context; no ambient global DB client for business data.
-4. **Migrations** are generated via Drizzle, checked in, and applied by the tenant migration runner; never hand-edit applied migrations.
+4. ~~**Migrations** are generated via Drizzle, checked in, and applied by the tenant migration runner; never hand-edit applied migrations.~~ **Migrations** are SQL files, checked in, and applied by the tenant migration runner; never hand-edit applied migrations.
 5. **Tests:** every P0 acceptance criterion in this doc maps to at least one automated test. The **cross-tenant isolation suite** and the **payment-vs-progress idempotency suite** are mandatory and block merge if failing.
 6. **Domain events** for side-effects; no synchronous notification/PDF work inside request handlers.
 7. **`AuditLog`** written by a shared interceptor on state-changing endpoints.
@@ -589,4 +598,5 @@ Build in this order. Each phase ends with a PR that lists migrations, new endpoi
 - Currency INR; Indian tax (GST) and date/number formats are defaults; multi-currency is P2.
 - Single Neon database with schema-per-tenant is acceptable for expected v1 tenant counts; database-per-tenant is a P2 escape hatch for large tenants.
 - "OpenAI agents" = OpenAI Responses/Agents API behind `AiService`; no fine-tuning required for v1.
-- The source brief's stack directives (React + Ant Design, Node, Neon, Vercel, Flutter, OpenAI, Brevo/SMTP, Twilio/2Factor, WhatsApp Business API) are authoritative; framework-level choices (NestJS, Drizzle, BullMQ, monorepo) are the agent's defaults recorded here and overridable via `DECISIONS.md`.
+- ~~The source brief's stack directives (React + Ant Design, Node, Neon, Vercel, Flutter, OpenAI, Brevo/SMTP, Twilio/2Factor, WhatsApp Business API) are authoritative; framework-level choices (NestJS, Drizzle, BullMQ, monorepo) are the agent's defaults recorded here and overridable via `DECISIONS.md`.~~
+- **Current stack:** Next.js 15 (App Router) + JavaScript + Ant Design 5 + PostgreSQL + pg + BullMQ + Flutter. Full-stack monolith with separate worker process.
