@@ -1,4 +1,4 @@
-# Hippo Build EX UI Themes
+# Hippo Build X UI Themes
 
 This package contains six themes for the current Next.js + Tailwind application.
 

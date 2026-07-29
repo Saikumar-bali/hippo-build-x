@@ -14,7 +14,7 @@ export default function DashboardPreview() {
     <main className="min-h-screen p-6" style={{ color: "var(--ui-text)", background: "var(--ui-background)" }}>
       <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-sm" style={{ color: "var(--ui-text-muted)" }}>Hippo Build EX</p>
+          <p className="text-sm" style={{ color: "var(--ui-text-muted)" }}>Hippo Build X</p>
           <h1 className="text-2xl font-semibold">Construction ERP Dashboard</h1>
         </div>
         <ThemeSwitcher />

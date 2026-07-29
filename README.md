@@ -18,7 +18,7 @@ Multi-tenant construction management platform built with Next.js as a full-stack
 ## Repository Structure
 
 ```
-hippo-build-ex/
+hippo-build-x/
 ├── apps/
 │   ├── web/          # Next.js full-stack (UI + API routes)
 │   └── mobile/       # Flutter mobile app

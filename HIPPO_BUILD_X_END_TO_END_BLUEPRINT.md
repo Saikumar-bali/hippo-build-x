@@ -1,5 +1,5 @@
-# Hippo Build EX — End-to-End Construction ERP Build Blueprint
-**Repository:** `Saikumar-bali/hippo-build-ex`  
+# Hippo Build X — End-to-End Construction ERP Build Blueprint
+**Repository:** `Saikumar-bali/hippo-build-x`  
 **Purpose:** Canonical implementation plan for building the project safely, phase by phase, from foundation to production.
 ## Product vision
 ```text
