@@ -1,4 +1,34 @@
-body {
+:root {
+  --ui-primary: #1D4ED8;
+  --ui-primary-hover: #1E40AF;
+  --ui-primary-soft: #DBEAFE;
+  --ui-background: #F4F7FB;
+  --ui-surface: #FFFFFF;
+  --ui-surface-muted: #EAF0F8;
+  --ui-sidebar: #082F49;
+  --ui-sidebar-text: #E0F2FE;
+  --ui-text: #0F172A;
+  --ui-text-muted: #64748B;
+  --ui-border: #D7E0EC;
+  --ui-success: #15803D;
+  --ui-warning: #D97706;
+  --ui-danger: #B91C1C;
+  --ui-info: #0369A1;
+  --ui-radius: 10px;
+}
+
+html, body {
   margin: 0;
   padding: 0;
+  min-height: 100%;
+  color: var(--ui-text);
+  background: var(--ui-background);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+button, input, select, textarea {
+  font: inherit;
 }

@@ -1,0 +1,23 @@
+:root {
+  --ui-primary: #1d4ed8;
+  --ui-primary-hover: #1e40af;
+  --ui-primary-soft: #dbeafe;
+  --ui-background: #f4f7fb;
+  --ui-surface: #ffffff;
+  --ui-surface-muted: #eaf0f8;
+  --ui-sidebar: #082f49;
+  --ui-sidebar-text: #e0f2fe;
+  --ui-text: #0f172a;
+  --ui-text-muted: #64748b;
+  --ui-border: #d7e0ec;
+  --ui-success: #15803d;
+  --ui-warning: #d97706;
+  --ui-danger: #b91c1c;
+  --ui-info: #0369a1;
+  --ui-radius: 10px;
+}
+
+html, body { margin: 0; min-height: 100%; }
+* { box-sizing: border-box; }
+body { color: var(--ui-text); background: var(--ui-background); }
+button, input, select, textarea { font: inherit; }
