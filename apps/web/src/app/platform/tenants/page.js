@@ -161,7 +161,7 @@ export default function PlatformTenantsPage() {
         onCancel={() => setOpen(false)}
         onOk={() => form.submit()}
         confirmLoading={saving}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" onFinish={onCreate} requiredMark={false}>
           <Form.Item label="Name" name="name" rules={[{ required: true }]}>

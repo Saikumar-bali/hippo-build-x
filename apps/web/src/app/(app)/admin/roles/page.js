@@ -156,7 +156,7 @@ export default function RolesAdminPage() {
         open={creating}
         onCancel={() => setCreating(false)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={createForm} layout="vertical" onFinish={createRole}>
           <Form.Item name="name" label="Name" rules={[{ required: true }]}>

@@ -467,7 +467,7 @@ export default function ProjectDetailPage() {
           form.resetFields();
         }}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={form} layout="vertical" onFinish={submitModal}>
           {modal === 'block' && (

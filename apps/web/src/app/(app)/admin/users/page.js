@@ -200,7 +200,7 @@ export default function UsersAdminPage() {
         <Table rowKey="id" dataSource={users} columns={columns} />
       )}
 
-      <Modal title="Create user" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnClose>
+      <Modal title="Create user" open={open} onCancel={() => setOpen(false)} footer={null} destroyOnHidden>
         <Form form={form} layout="vertical" onFinish={createUser}>
           <Form.Item name="name" label="Name" rules={[{ required: true }]}>
             <Input />
@@ -223,7 +223,7 @@ export default function UsersAdminPage() {
         open={Boolean(editing)}
         onCancel={() => setEditing(null)}
         footer={null}
-        destroyOnClose
+        destroyOnHidden
       >
         <Form form={editForm} layout="vertical" onFinish={updateUser}>
           <Form.Item name="name" label="Name" rules={[{ required: true }]}>

@@ -3,7 +3,6 @@
 import { useEffect, useState } from 'react';
 import { Layout, Menu, Typography, Button, Spin, theme } from 'antd';
 import {
-  DashboardOutlined,
   TeamOutlined,
   SafetyOutlined,
   BgColorsOutlined,
@@ -17,7 +16,6 @@ import { usePathname, useRouter } from 'next/navigation';
 const { Header, Sider, Content } = Layout;
 
 const items = [
-  { key: '/dashboard', icon: <DashboardOutlined />, label: 'Dashboard' },
   { key: '/projects', icon: <ProjectOutlined />, label: 'Projects' },
   { key: '/admin/users', icon: <TeamOutlined />, label: 'Users' },
   { key: '/admin/roles', icon: <SafetyOutlined />, label: 'Roles' },
@@ -70,13 +68,35 @@ export default function AppShellLayout({ children }) {
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Sider breakpoint="lg" collapsedWidth={64} theme="light" style={{ borderRight: `1px solid ${token.colorBorderSecondary}` }}>
-        <div style={{ padding: 16, fontWeight: 700 }}>Hippo Build X</div>
+      <Sider
+        breakpoint="lg"
+        collapsedWidth={64}
+        theme="dark"
+        style={{
+          background: '#0f2b46',
+        }}
+      >
+        <div
+          style={{
+            padding: '16px 20px',
+            fontWeight: 700,
+            fontSize: 16,
+            color: '#ffffff',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+            borderBottom: '1px solid rgba(255,255,255,0.1)',
+          }}
+        >
+          <span style={{ fontSize: 22 }}>🏗️</span> Hippo Build X
+        </div>
         <Menu
           mode="inline"
+          theme="dark"
           selectedKeys={[pathname.startsWith('/projects') ? '/projects' : pathname]}
           items={items}
           onClick={({ key }) => router.push(key)}
+          style={{ borderInlineEnd: 'none' }}
         />
       </Sider>
       <Layout>
@@ -88,9 +108,10 @@ export default function AppShellLayout({ children }) {
             justifyContent: 'space-between',
             paddingInline: 24,
             borderBottom: `1px solid ${token.colorBorderSecondary}`,
+            boxShadow: '0 1px 4px rgba(0,0,0,0.05)',
           }}
         >
-          <Typography.Text>
+          <Typography.Text type="secondary" style={{ fontSize: 14 }}>
             {me?.user?.name} · {me?.tenant?.slug}
           </Typography.Text>
           <Button icon={<LogoutOutlined />} onClick={logout}>
