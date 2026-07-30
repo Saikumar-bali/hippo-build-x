@@ -1,4 +1,4 @@
-import { getSql } from '@hippo/db';
+import { createControlPlaneSql } from '@hippo/db';
 import { AppError } from '@hippo/shared';
 import {
   verifyPassword,
@@ -7,11 +7,8 @@ import {
   verifyRefreshToken,
 } from '@/lib/auth.js';
 
-/**
- * @param {{ email: string, password: string }} input
- */
 export async function loginPlatformUser({ email, password }) {
-  const sql = getSql();
+  const sql = createControlPlaneSql();
   const rows = await sql`
     SELECT id, email, name, password_hash, role, status
     FROM platform_users
@@ -23,17 +20,14 @@ export async function loginPlatformUser({ email, password }) {
     throw AppError.unauthorized('Invalid credentials');
   }
 
-  const ok = await verifyPassword(user.password_hash, password);
-  if (!ok) throw AppError.unauthorized('Invalid credentials');
+  if (!(await verifyPassword(user.password_hash, password))) {
+    throw AppError.unauthorized('Invalid credentials');
+  }
 
   const accessToken = await signAccessToken({
     sub: user.id,
-    email: user.email,
-    name: user.name,
-    role: user.role,
     scope: 'platform',
   });
-
   const refreshToken = await signRefreshToken({
     sub: user.id,
     scope: 'platform',
@@ -42,18 +36,10 @@ export async function loginPlatformUser({ email, password }) {
   return {
     accessToken,
     refreshToken,
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name,
-      role: user.role,
-    },
+    user: { id: user.id, email: user.email, name: user.name, role: user.role },
   };
 }
 
-/**
- * @param {string} refreshToken
- */
 export async function refreshPlatformSession(refreshToken) {
   const payload = await verifyRefreshToken(refreshToken);
   if (!payload?.sub || payload.scope !== 'platform') {
@@ -62,26 +48,15 @@ export async function refreshPlatformSession(refreshToken) {
   const user = await loadPlatformUser(payload.sub);
   if (!user) throw AppError.unauthorized('Invalid refresh token');
 
-  const accessToken = await signAccessToken({
-    sub: user.id,
-    email: user.email,
-    name: user.name,
-    role: user.role,
-    scope: 'platform',
-  });
-  const nextRefresh = await signRefreshToken({
-    sub: user.id,
-    scope: 'platform',
-  });
-
-  return { accessToken, refreshToken: nextRefresh, user };
+  return {
+    accessToken: await signAccessToken({ sub: user.id, scope: 'platform' }),
+    refreshToken: await signRefreshToken({ sub: user.id, scope: 'platform' }),
+    user,
+  };
 }
 
-/**
- * @param {string} userId
- */
 export async function loadPlatformUser(userId) {
-  const sql = getSql();
+  const sql = createControlPlaneSql();
   const rows = await sql`
     SELECT id, email, name, role, status
     FROM platform_users
