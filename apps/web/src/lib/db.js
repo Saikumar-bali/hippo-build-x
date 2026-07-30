@@ -1,30 +1,19 @@
 /**
- * @deprecated Prefer controlPlaneSql / tenantSql from api-utils + @hippo/db.
- * Kept as thin wrappers for any remaining call sites.
+ * Global application queries are intentionally disabled by PRD §5.
+ *
+ * Use:
+ * - controlPlaneSql() for shared platform records
+ * - tenantSql() for request-scoped tenant business records
+ *
+ * This module remains only to fail loudly if an old import survives a refactor.
  */
-export { getSql as getPool } from '@hippo/db';
-
-import { getSql } from '@hippo/db';
-
-export async function query(text, params = []) {
-  const sql = getSql();
-  return sql.unsafe(text, params);
+function disabled() {
+  throw new Error(
+    'Global database access is disabled; use controlPlaneSql() or tenantSql() with explicit context',
+  );
 }
 
-export async function queryOne(text, params = []) {
-  const rows = await query(text, params);
-  return rows[0] || null;
-}
-
-export async function transaction(fn) {
-  const sql = getSql();
-  return sql.begin(async (tx) => {
-    const client = {
-      query: async (text, params = []) => {
-        const rows = await tx.unsafe(text, params);
-        return { rows };
-      },
-    };
-    return fn(client);
-  });
-}
+export const getPool = disabled;
+export const query = disabled;
+export const queryOne = disabled;
+export const transaction = disabled;
