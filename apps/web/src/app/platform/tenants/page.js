@@ -1,24 +1,85 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Alert,
   Button,
+  Card,
+  Col,
+  Descriptions,
+  Drawer,
   Form,
   Input,
   Layout,
   Modal,
+  Progress,
+  Row,
   Space,
+  Statistic,
+  Steps,
   Table,
   Tag,
+  Tooltip,
   Typography,
   message,
 } from 'antd';
-import { CrownOutlined, LogoutOutlined, PlusOutlined } from '@ant-design/icons';
+import {
+  CrownOutlined,
+  DatabaseOutlined,
+  EyeOutlined,
+  LogoutOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SafetyCertificateOutlined,
+  SyncOutlined,
+} from '@ant-design/icons';
 import { useRouter } from 'next/navigation';
 
 const { Header, Content } = Layout;
-const { Title, Text } = Typography;
+const { Title, Text, Paragraph } = Typography;
+
+const STEP_ORDER = [
+  'registered',
+  'queued',
+  'starting',
+  'schema_created',
+  'migrations_applied',
+  'defaults_seeded',
+  'channel_record_created',
+  'active',
+];
+
+const STEP_LABELS = {
+  registered: 'Tenant registered',
+  queued: 'Provisioning queued',
+  starting: 'Worker started',
+  schema_created: 'Isolated schema created',
+  migrations_applied: 'Tenant migrations applied',
+  defaults_seeded: 'Roles and administrator seeded',
+  channel_record_created: 'Channel vault initialized',
+  active: 'Tenant activated',
+  failed: 'Provisioning failed',
+  queue_failed: 'Queue unavailable',
+};
+
+function statusColor(status) {
+  if (status === 'active' || status === 'completed') return 'green';
+  if (status === 'provisioning' || status === 'queued' || status === 'running') return 'blue';
+  if (status === 'failed') return 'red';
+  if (status === 'suspended') return 'orange';
+  return 'default';
+}
+
+function provisionPercent(step, status) {
+  if (status === 'completed' || step === 'active') return 100;
+  const index = STEP_ORDER.indexOf(step);
+  if (index < 0) return status === 'failed' ? 100 : 5;
+  return Math.max(8, Math.round(((index + 1) / STEP_ORDER.length) * 100));
+}
+
+function formatDate(value) {
+  return value ? new Date(value).toLocaleString() : '—';
+}
 
 export default function PlatformTenantsPage() {
   const router = useRouter();
@@ -28,59 +89,133 @@ export default function PlatformTenantsPage() {
   const [error, setError] = useState('');
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [selected, setSelected] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [retryingId, setRetryingId] = useState(null);
   const [form] = Form.useForm();
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const meRes = await fetch('/api/v1/platform/auth/me');
-      if (meRes.status === 401) {
-        router.replace('/platform/login');
-        return;
-      }
-      const meJson = await meRes.json();
-      setMe(meJson.data?.user || null);
+  const load = useCallback(
+    async ({ quiet = false } = {}) => {
+      if (!quiet) setLoading(true);
+      setError('');
+      try {
+        const meRes = await fetch('/api/v1/platform/auth/me');
+        if (meRes.status === 401) {
+          router.replace('/platform/login');
+          return;
+        }
+        const meJson = await meRes.json();
+        setMe(meJson.data?.user || null);
 
-      const listRes = await fetch('/api/v1/platform/tenants');
-      const listJson = await listRes.json();
-      if (!listRes.ok) {
-        setError(listJson.errors?.[0]?.message || 'Failed to load tenants');
-        return;
+        const listRes = await fetch('/api/v1/platform/tenants', { cache: 'no-store' });
+        const listJson = await listRes.json();
+        if (!listRes.ok) {
+          setError(listJson.errors?.[0]?.message || 'Failed to load tenants');
+          return;
+        }
+        setTenants(listJson.data || []);
+      } catch {
+        setError('Unable to reach the platform API');
+      } finally {
+        if (!quiet) setLoading(false);
       }
-      setTenants(listJson.data || []);
-    } catch {
-      setError('Unable to reach server');
-    } finally {
-      setLoading(false);
-    }
-  }, [router]);
+    },
+    [router],
+  );
 
   useEffect(() => {
     load();
   }, [load]);
+
+  const hasWorkInProgress = tenants.some(
+    (tenant) =>
+      tenant.status === 'provisioning' ||
+      ['queued', 'running'].includes(tenant.provisioning_job_status),
+  );
+
+  useEffect(() => {
+    if (!hasWorkInProgress) return undefined;
+    const timer = setInterval(() => load({ quiet: true }), 4000);
+    return () => clearInterval(timer);
+  }, [hasWorkInProgress, load]);
+
+  const stats = useMemo(
+    () => ({
+      total: tenants.length,
+      active: tenants.filter((tenant) => tenant.status === 'active').length,
+      provisioning: tenants.filter((tenant) => tenant.status === 'provisioning').length,
+      failed: tenants.filter((tenant) => tenant.status === 'failed').length,
+    }),
+    [tenants],
+  );
 
   async function onCreate(values) {
     setSaving(true);
     try {
       const res = await fetch('/api/v1/platform/tenants', {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(values),
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': `tenant-create:${values.slug}`,
+        },
+        body: JSON.stringify({ ...values, isolationMode: 'shared_schema' }),
       });
       const json = await res.json();
       if (!res.ok || !json.success) {
-        message.error(json.errors?.[0]?.message || 'Create failed');
+        message.error(json.errors?.[0]?.message || 'Tenant creation failed');
         return;
       }
-      message.success(`Tenant ${json.data?.slug} created (${json.data?.status})`);
+      message.success(`Provisioning started for ${json.data?.name}`);
       setOpen(false);
       form.resetFields();
-      await load();
+      await load({ quiet: true });
+      if (json.data?.id) await openDetail(json.data.id);
     } catch {
-      message.error('Unable to reach server');
+      message.error('Unable to reach the platform API');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function openDetail(id) {
+    setDetailLoading(true);
+    setSelected({ id });
+    try {
+      const res = await fetch(`/api/v1/platform/tenants/${id}`, { cache: 'no-store' });
+      const json = await res.json();
+      if (!res.ok) {
+        message.error(json.errors?.[0]?.message || 'Unable to load tenant');
+        setSelected(null);
+        return;
+      }
+      setSelected(json.data);
+    } catch {
+      message.error('Unable to load tenant details');
+      setSelected(null);
+    } finally {
+      setDetailLoading(false);
+    }
+  }
+
+  async function retryTenant(id) {
+    setRetryingId(id);
+    try {
+      const res = await fetch(`/api/v1/platform/tenants/${id}/retry-provisioning`, {
+        method: 'POST',
+        headers: { 'idempotency-key': `tenant-retry:${id}:${crypto.randomUUID()}` },
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        message.error(json.errors?.[0]?.message || 'Retry failed');
+        return;
+      }
+      message.success('Provisioning retry queued');
+      await load({ quiet: true });
+      await openDetail(id);
+    } catch {
+      message.error('Unable to retry provisioning');
+    } finally {
+      setRetryingId(null);
     }
   }
 
@@ -90,104 +225,305 @@ export default function PlatformTenantsPage() {
   }
 
   const columns = [
-    { title: 'Name', dataIndex: 'name' },
-    { title: 'Slug', dataIndex: 'slug' },
     {
-      title: 'Status',
-      dataIndex: 'status',
-      render: (status) => (
-        <Tag color={status === 'active' ? 'green' : status === 'provisioning' ? 'blue' : 'orange'}>
-          {status}
+      title: 'Organization',
+      dataIndex: 'name',
+      render: (name, tenant) => (
+        <Space direction="vertical" size={0}>
+          <Text strong>{name}</Text>
+          <Text type="secondary">{tenant.slug}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: 'Isolation',
+      dataIndex: 'isolation_mode',
+      render: (mode) => (
+        <Tag icon={<DatabaseOutlined />} color="geekblue">
+          {mode === 'dedicated_database' ? 'Dedicated database' : 'Shared DB · isolated schema'}
         </Tag>
       ),
     },
-    { title: 'Schema', dataIndex: 'schema_name' },
+    {
+      title: 'Provisioning',
+      width: 250,
+      render: (_, tenant) => {
+        const step = tenant.provisioning_current_step || 'registered';
+        const jobStatus = tenant.provisioning_job_status;
+        return (
+          <Space direction="vertical" size={2} style={{ width: '100%' }}>
+            <Space>
+              {['queued', 'running'].includes(jobStatus) ? <SyncOutlined spin /> : null}
+              <Text>{STEP_LABELS[step] || step.replaceAll('_', ' ')}</Text>
+            </Space>
+            <Progress
+              percent={provisionPercent(step, jobStatus)}
+              size="small"
+              status={jobStatus === 'failed' ? 'exception' : jobStatus === 'completed' ? 'success' : 'active'}
+              showInfo={false}
+            />
+          </Space>
+        );
+      },
+    },
+    {
+      title: 'Status',
+      dataIndex: 'status',
+      render: (status) => <Tag color={statusColor(status)}>{status.toUpperCase()}</Tag>,
+    },
+    {
+      title: 'Migration',
+      dataIndex: 'migration_version',
+      responsive: ['lg'],
+      render: (value) => value || 'Pending',
+    },
     {
       title: 'Created',
       dataIndex: 'created_at',
-      render: (v) => (v ? new Date(v).toLocaleString() : '—'),
+      responsive: ['xl'],
+      render: formatDate,
+    },
+    {
+      title: '',
+      key: 'actions',
+      width: 110,
+      render: (_, tenant) => (
+        <Space>
+          <Tooltip title="View isolation and provisioning details">
+            <Button icon={<EyeOutlined />} onClick={() => openDetail(tenant.id)} />
+          </Tooltip>
+          {tenant.status === 'failed' ? (
+            <Tooltip title="Retry safely from the last idempotent step">
+              <Button
+                type="primary"
+                icon={<ReloadOutlined />}
+                loading={retryingId === tenant.id}
+                onClick={() => retryTenant(tenant.id)}
+              />
+            </Tooltip>
+          ) : null}
+        </Space>
+      ),
     },
   ];
 
+  const latestJob = selected?.provisioningJobs?.[0];
+  const activeStep = STEP_ORDER.indexOf(latestJob?.current_step);
+  const stepItems = STEP_ORDER.map((key, index) => ({
+    title: STEP_LABELS[key],
+    status:
+      latestJob?.status === 'failed' && index > Math.max(activeStep, 0)
+        ? 'wait'
+        : index < activeStep
+          ? 'finish'
+          : index === activeStep
+            ? latestJob?.status === 'failed'
+              ? 'error'
+              : 'process'
+            : 'wait',
+  }));
+
   return (
-    <Layout style={{ minHeight: '100vh' }}>
+    <Layout style={{ minHeight: '100vh', background: '#f5f7fb' }}>
       <Header
         style={{
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
-          background: '#141414',
+          background: '#111827',
           paddingInline: 24,
+          boxShadow: '0 2px 10px rgba(0,0,0,.18)',
         }}
       >
         <Space>
-          <CrownOutlined style={{ color: '#faad14', fontSize: 20 }} />
+          <CrownOutlined style={{ color: '#fbbf24', fontSize: 22 }} />
           <Title level={4} style={{ color: '#fff', margin: 0 }}>
-            Platform Console
+            Platform Control Plane
           </Title>
         </Space>
         <Space>
-          <Text style={{ color: '#d9d9d9' }}>{me?.email}</Text>
+          <Text style={{ color: '#d1d5db' }}>{me?.email}</Text>
           <Button icon={<LogoutOutlined />} onClick={onLogout}>
             Logout
           </Button>
         </Space>
       </Header>
-      <Content style={{ padding: 24, maxWidth: 1100, margin: '0 auto', width: '100%' }}>
-        <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
+
+      <Content style={{ padding: 24, maxWidth: 1400, margin: '0 auto', width: '100%' }}>
+        <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 20 }}>
           <div>
-            <Title level={3} style={{ marginBottom: 4 }}>
-              Tenants
+            <Title level={2} style={{ marginBottom: 4 }}>
+              Tenant isolation
             </Title>
-            <Text type="secondary">Create and provision builder organizations</Text>
+            <Text type="secondary">
+              Schema-per-tenant operations on the shared Neon control plane
+            </Text>
           </div>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
-            Create tenant
-          </Button>
+          <Space>
+            <Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>
+              Refresh
+            </Button>
+            <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
+              Provision tenant
+            </Button>
+          </Space>
         </Space>
-        {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
-        <Table
-          rowKey="id"
-          loading={loading}
-          columns={columns}
-          dataSource={tenants}
-          pagination={{ pageSize: 20 }}
+
+        <Row gutter={[16, 16]} style={{ marginBottom: 20 }}>
+          <Col xs={12} lg={6}>
+            <Card><Statistic title="Total tenants" value={stats.total} prefix={<DatabaseOutlined />} /></Card>
+          </Col>
+          <Col xs={12} lg={6}>
+            <Card><Statistic title="Active" value={stats.active} valueStyle={{ color: '#15803d' }} /></Card>
+          </Col>
+          <Col xs={12} lg={6}>
+            <Card><Statistic title="Provisioning" value={stats.provisioning} valueStyle={{ color: '#1d4ed8' }} /></Card>
+          </Col>
+          <Col xs={12} lg={6}>
+            <Card><Statistic title="Needs attention" value={stats.failed} valueStyle={{ color: '#b91c1c' }} /></Card>
+          </Col>
+        </Row>
+
+        <Alert
+          type="info"
+          showIcon
+          icon={<SafetyCertificateOutlined />}
+          message="Locked isolation policy"
+          description="Every tenant receives an immutable ID-based PostgreSQL schema, forced row-level policies, independently tracked migrations and encrypted channel configuration. Slugs are routing labels and never select a database schema."
+          style={{ marginBottom: 20 }}
         />
+
+        {error ? <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} /> : null}
+        <Card styles={{ body: { padding: 0 } }}>
+          <Table
+            rowKey="id"
+            loading={loading}
+            columns={columns}
+            dataSource={tenants}
+            pagination={{ pageSize: 20, showSizeChanger: false }}
+            scroll={{ x: 1050 }}
+          />
+        </Card>
       </Content>
 
       <Modal
-        title="Create tenant"
+        title="Provision an isolated tenant"
         open={open}
         onCancel={() => setOpen(false)}
         onOk={() => form.submit()}
+        okText="Start provisioning"
         confirmLoading={saving}
         destroyOnHidden
       >
+        <Alert
+          type="success"
+          showIcon
+          message="Shared Neon database · dedicated tenant schema"
+          description="The platform generates an immutable schema from the tenant UUID, applies all migrations, seeds the first administrator and initializes the encrypted channel vault."
+          style={{ marginBottom: 18 }}
+        />
         <Form form={form} layout="vertical" onFinish={onCreate} requiredMark={false}>
-          <Form.Item label="Name" name="name" rules={[{ required: true }]}>
-            <Input placeholder="Acme Developers" />
+          <Form.Item label="Organization name" name="name" rules={[{ required: true }]}> 
+            <Input placeholder="Acme Developers" autoFocus />
           </Form.Item>
           <Form.Item
-            label="Slug"
+            label="Tenant slug"
             name="slug"
+            extra="Used for login and URLs only. It does not determine the database schema."
             rules={[
               { required: true },
               {
                 pattern: /^[a-z0-9]+(?:-[a-z0-9]+)*$/,
-                message: 'Lowercase alphanumeric with hyphens',
+                message: 'Use lowercase letters, numbers and hyphens',
               },
             ]}
           >
-            <Input placeholder="acme" />
+            <Input placeholder="acme-developers" />
           </Form.Item>
-          <Form.Item label="Admin email" name="adminEmail" rules={[{ type: 'email' }]}>
+          <Form.Item
+            label="Initial administrator email"
+            name="adminEmail"
+            rules={[{ required: true }, { type: 'email' }]}
+          >
             <Input placeholder="admin@acme.example" />
           </Form.Item>
-          <Form.Item label="Admin name" name="adminName">
+          <Form.Item label="Administrator name" name="adminName">
             <Input placeholder="Tenant Administrator" />
           </Form.Item>
         </Form>
       </Modal>
+
+      <Drawer
+        title={selected?.name || 'Tenant details'}
+        open={Boolean(selected)}
+        onClose={() => setSelected(null)}
+        width={620}
+        loading={detailLoading}
+        extra={
+          selected?.status === 'failed' ? (
+            <Button
+              type="primary"
+              icon={<ReloadOutlined />}
+              loading={retryingId === selected.id}
+              onClick={() => retryTenant(selected.id)}
+            >
+              Retry provisioning
+            </Button>
+          ) : null
+        }
+      >
+        {selected?.id && !detailLoading ? (
+          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+            {latestJob?.status === 'failed' ? (
+              <Alert
+                type="error"
+                showIcon
+                message={latestJob.error_code || 'Provisioning failed'}
+                description={latestJob.error_message || 'Review the worker logs and retry safely.'}
+              />
+            ) : null}
+
+            <Descriptions bordered size="small" column={1}>
+              <Descriptions.Item label="Tenant ID"><Text copyable>{selected.id}</Text></Descriptions.Item>
+              <Descriptions.Item label="Slug">{selected.slug}</Descriptions.Item>
+              <Descriptions.Item label="Status"><Tag color={statusColor(selected.status)}>{selected.status}</Tag></Descriptions.Item>
+              <Descriptions.Item label="Isolation mode">Shared database · dedicated schema</Descriptions.Item>
+              <Descriptions.Item label="Schema"><Text copyable>{selected.schema_name}</Text></Descriptions.Item>
+              <Descriptions.Item label="Migration version">{selected.migration_version || 'Pending'}</Descriptions.Item>
+              <Descriptions.Item label="Data location">{selected.data_location_status}</Descriptions.Item>
+              <Descriptions.Item label="Created">{formatDate(selected.created_at)}</Descriptions.Item>
+            </Descriptions>
+
+            <Card title="Latest provisioning attempt" size="small">
+              <Steps direction="vertical" size="small" items={stepItems} />
+              {latestJob ? (
+                <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  Attempt {latestJob.attempt_count} · Started {formatDate(latestJob.started_at)} · Finished {formatDate(latestJob.finished_at)}
+                </Paragraph>
+              ) : null}
+            </Card>
+
+            <Card title="Channel credential vault" size="small">
+              {selected.channels?.length ? (
+                selected.channels.map((channel) => (
+                  <Descriptions key={channel.channel_type} size="small" column={1} bordered>
+                    <Descriptions.Item label="Channel">{channel.channel_type}</Descriptions.Item>
+                    <Descriptions.Item label="Provider">{channel.provider}</Descriptions.Item>
+                    <Descriptions.Item label="Verification">
+                      <Tag color={channel.verification_status === 'verified' ? 'green' : 'default'}>
+                        {channel.verification_status}
+                      </Tag>
+                    </Descriptions.Item>
+                    <Descriptions.Item label="Key version">{channel.encryption_key_version}</Descriptions.Item>
+                  </Descriptions>
+                ))
+              ) : (
+                <Text type="secondary">Vault initialization is pending.</Text>
+              )}
+            </Card>
+          </Space>
+        ) : null}
+      </Drawer>
     </Layout>
   );
 }
