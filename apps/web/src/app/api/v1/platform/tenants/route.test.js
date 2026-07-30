@@ -216,7 +216,8 @@ describe('tenant creation idempotency', () => {
     expect(state.enqueue.mock.calls.length).toBeGreaterThanOrEqual(1);
     expect(
       state.enqueue.mock.calls.every(
-        ([payload]) => payload.provisioningJobId === JOB_ID && payload.tenantId === TENANT_ID,
+        ([payload]) =>
+          payload.provisioningJobId === JOB_ID && payload.tenantId === state.tenant.id,
       ),
     ).toBe(true);
     expect(state.job.idempotency_key).toBe(IDEMPOTENCY_KEY);
