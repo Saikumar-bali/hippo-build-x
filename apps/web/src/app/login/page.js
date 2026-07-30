@@ -62,25 +62,19 @@ export default function LoginPage() {
           <Form.Item
             label="Tenant slug"
             name="slug"
-            initialValue="green-valley"
             rules={[{ required: true, message: 'Tenant slug is required' }]}
           >
-            <Input placeholder="green-valley" size="large" />
+            <Input placeholder="green-valley" size="large" autoComplete="organization" />
           </Form.Item>
-          <Form.Item
-            label="Email"
-            name="email"
-            initialValue="admin@greenvalley.example"
-            rules={[{ required: true, type: 'email' }]}
-          >
-            <Input size="large" />
+          <Form.Item label="Email" name="email" rules={[{ required: true, type: 'email' }]}>
+            <Input size="large" placeholder="admin@company.com" autoComplete="username" />
           </Form.Item>
           <Form.Item
             label="Password"
             name="password"
             rules={[{ required: true, message: 'Password is required' }]}
           >
-            <Input.Password size="large" />
+            <Input.Password size="large" autoComplete="current-password" />
           </Form.Item>
           <Button type="primary" htmlType="submit" block size="large" loading={loading}>
             Login

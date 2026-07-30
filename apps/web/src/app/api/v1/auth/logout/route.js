@@ -5,8 +5,8 @@ import { getRequestContext } from '@/lib/tenant-context.js';
 
 export const POST = withApiHandler({ auth: true }, async () => {
   const ctx = getRequestContext();
-  if (ctx.sessionId && ctx.schemaName) {
-    await revokeSession(ctx.schemaName, ctx.sessionId);
+  if (ctx.sessionId && ctx.schemaName && ctx.tenantId) {
+    await revokeSession(ctx.schemaName, ctx.tenantId, ctx.sessionId);
   }
   return clearAuthCookies(successResponse({ ok: true }));
 });

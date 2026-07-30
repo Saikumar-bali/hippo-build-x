@@ -2,48 +2,219 @@ import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import {
   provisionTenantSchema,
-  rollbackTenantProvisioning,
-  runControlPlaneMigrations,
+  isControlPlaneReady,
+  createControlPlaneSql,
   createLogger,
   validateEnv,
   workerEnvSchema,
 } from './deps.js';
+import {
+  getProvisioningAttemptState,
+  getProvisioningFailureTransition,
+} from './provisioning-attempt.js';
+import { reportProvisioningStep } from './provisioning-progress.js';
 
 const log = createLogger({ service: 'hippo-worker' });
-
 validateEnv(workerEnvSchema);
 
-const REDIS_URL = process.env.REDIS_URL;
-const connection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null });
+if (!(await isControlPlaneReady())) {
+  throw new Error(
+    'Control plane is not ready. Run db:migrate:control and db:migrate:tenants with MIGRATION_DATABASE_URL before starting the worker.',
+  );
+}
 
-// Ensure control plane exists before processing jobs
-await runControlPlaneMigrations();
-log.info('Control plane migrations applied');
+const connection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
+
+async function updateProvisioningJob(jobId, values) {
+  if (!jobId) return;
+  const sql = createControlPlaneSql();
+  await sql.unsafe(
+    `UPDATE provisioning_jobs
+     SET status = COALESCE($2, status),
+         current_step = COALESCE($3, current_step),
+         error_code = $4,
+         error_message = $5,
+         started_at = CASE WHEN $6::boolean THEN COALESCE(started_at, NOW()) ELSE started_at END,
+         finished_at = CASE
+           WHEN $7::boolean THEN NOW()
+           WHEN $8::boolean THEN NULL
+           ELSE finished_at
+         END,
+         attempt_count = attempt_count + CASE WHEN $9::boolean THEN 1 ELSE 0 END,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [
+      jobId,
+      values.status || null,
+      values.currentStep || null,
+      values.errorCode || null,
+      values.errorMessage || null,
+      Boolean(values.started),
+      Boolean(values.finished),
+      Boolean(values.clearFinished),
+      Boolean(values.incrementAttempt),
+    ],
+  );
+}
+
+function warnReportingFailure({ error, currentStep, channel, tenantId, provisioningJobId, jobId }) {
+  log.warn('Unable to report provisioning state', {
+    tenantId,
+    provisioningJobId,
+    jobId,
+    currentStep,
+    channel,
+    err: String(error?.message || error),
+  });
+}
+
+async function reportJobState({
+  currentStep,
+  values,
+  job,
+  tenantId,
+  provisioningJobId,
+  includeBullMqProgress = false,
+}) {
+  return reportProvisioningStep({
+    currentStep,
+    updateDurableState: () => updateProvisioningJob(provisioningJobId, values),
+    updateProgress: includeBullMqProgress
+      ? () => job.updateProgress({ currentStep })
+      : async () => {},
+    onDurableError: (error, step) =>
+      warnReportingFailure({
+        error,
+        currentStep: step,
+        channel: 'control_plane',
+        tenantId,
+        provisioningJobId,
+        jobId: job.id,
+      }),
+    onProgressError: (error, step) =>
+      warnReportingFailure({
+        error,
+        currentStep: step,
+        channel: 'bullmq',
+        tenantId,
+        provisioningJobId,
+        jobId: job.id,
+      }),
+  });
+}
 
 const tenantProvisionWorker = new Worker(
   'tenant.provision',
   async (job) => {
-    const { tenantId, schemaName, adminEmail, adminName } = job.data;
-    log.info('Provisioning tenant', { tenantId, schemaName, jobId: job.id });
+    const { tenantId, schemaName, adminEmail, adminName, provisioningJobId } = job.data;
+    const attempt = getProvisioningAttemptState(job);
+    const sql = createControlPlaneSql();
+
+    log.info('Provisioning tenant', {
+      tenantId,
+      schemaName,
+      provisioningJobId,
+      jobId: job.id,
+      attempt: attempt.attemptNumber,
+      configuredAttempts: attempt.configuredAttempts,
+    });
+
+    await sql`
+      UPDATE tenants
+      SET status = 'provisioning',
+          data_location_status = ${attempt.attemptNumber > 1 ? 'retrying' : 'provisioning'},
+          updated_at = NOW()
+      WHERE id = ${tenantId} AND status <> 'active'
+    `;
+    await reportJobState({
+      currentStep: 'starting',
+      values: {
+        status: 'running',
+        currentStep: 'starting',
+        started: true,
+        clearFinished: true,
+        incrementAttempt: true,
+      },
+      job,
+      tenantId,
+      provisioningJobId,
+    });
 
     try {
       const result = await provisionTenantSchema(tenantId, schemaName, {
         adminEmail,
         adminName,
+        onStep: (currentStep) =>
+          reportJobState({
+            currentStep,
+            values: { status: 'running', currentStep },
+            job,
+            tenantId,
+            provisioningJobId,
+            includeBullMqProgress: true,
+          }),
       });
-      log.info('Tenant provisioned', { ...result, jobId: job.id });
+      await reportJobState({
+        currentStep: 'active',
+        values: { status: 'completed', currentStep: 'active', finished: true },
+        job,
+        tenantId,
+        provisioningJobId,
+      });
+      log.info('Tenant provisioned', { ...result, provisioningJobId, jobId: job.id });
       return result;
     } catch (error) {
+      const errorMessage = String(error.message).slice(0, 2000);
+      const failure = getProvisioningFailureTransition(job, errorMessage);
+
       log.error('Tenant provisioning failed', {
         tenantId,
         schemaName,
-        err: error.message,
+        provisioningJobId,
+        err: errorMessage,
         jobId: job.id,
+        attempt: failure.attemptNumber,
+        configuredAttempts: failure.configuredAttempts,
+        terminal: failure.isFinalAttempt,
       });
+
       try {
-        await rollbackTenantProvisioning(schemaName, tenantId);
-      } catch (rollbackError) {
-        log.error('Rollback failed', { err: rollbackError.message, schemaName });
+        await sql`
+          UPDATE tenants
+          SET status = ${failure.tenantStatus},
+              data_location_status = ${failure.dataLocationStatus},
+              updated_at = NOW()
+          WHERE id = ${tenantId}
+        `;
+      } catch (reportingError) {
+        warnReportingFailure({
+          error: reportingError,
+          currentStep: failure.currentStep,
+          channel: 'tenant_failure_state',
+          tenantId,
+          provisioningJobId,
+          jobId: job.id,
+        });
+      }
+
+      try {
+        await updateProvisioningJob(provisioningJobId, {
+          status: failure.jobStatus,
+          currentStep: failure.currentStep,
+          errorCode: failure.errorCode,
+          errorMessage: failure.errorMessage,
+          finished: failure.finished,
+          clearFinished: failure.clearFinished,
+        });
+      } catch (reportingError) {
+        warnReportingFailure({
+          error: reportingError,
+          currentStep: failure.currentStep,
+          channel: 'control_plane_failure_state',
+          tenantId,
+          provisioningJobId,
+          jobId: job.id,
+        });
       }
       throw error;
     }
@@ -53,25 +224,21 @@ const tenantProvisionWorker = new Worker(
 
 const notificationWorker = new Worker(
   'notifications',
-  async (job) => {
-    log.info('Notification job', { jobId: job.id, data: job.data });
-  },
+  async (job) => log.info('Notification job', { jobId: job.id, data: job.data }),
   { connection },
 );
 
 const reportWorker = new Worker(
   'reports',
-  async (job) => {
-    log.info('Report job', { jobId: job.id, data: job.data });
-  },
+  async (job) => log.info('Report job', { jobId: job.id, data: job.data }),
   { connection },
 );
 
 tenantProvisionWorker.on('completed', (job) =>
   log.info('tenant.provision completed', { jobId: job.id }),
 );
-tenantProvisionWorker.on('failed', (job, err) =>
-  log.error('tenant.provision failed', { jobId: job?.id, err: err.message }),
+tenantProvisionWorker.on('failed', (job, error) =>
+  log.error('tenant.provision failed', { jobId: job?.id, err: error.message }),
 );
 
 log.info('Worker started', { queues: ['tenant.provision', 'notifications', 'reports'] });

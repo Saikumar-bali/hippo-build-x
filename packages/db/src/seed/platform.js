@@ -1,4 +1,4 @@
-import { getSql } from '../client.js';
+import { createControlPlaneSql } from '../client.js';
 import { hashPassword } from '@hippo/shared/crypto';
 
 export const PLATFORM_SUPER_ADMIN = {
@@ -7,11 +7,8 @@ export const PLATFORM_SUPER_ADMIN = {
   password: 'SuperAdmin@12345',
 };
 
-/**
- * Seed / refresh the control-plane super admin who can create tenants.
- */
 export async function seedPlatformSuperAdmin(admin = PLATFORM_SUPER_ADMIN) {
-  const sql = getSql();
+  const sql = createControlPlaneSql();
   const passwordHash = await hashPassword(admin.password);
   const existing = await sql`
     SELECT id FROM platform_users

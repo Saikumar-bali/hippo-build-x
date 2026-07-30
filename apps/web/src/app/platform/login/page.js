@@ -60,21 +60,11 @@ export default function PlatformLoginPage() {
           <Alert type="error" message={error} showIcon style={{ marginTop: 16, marginBottom: 8 }} />
         ) : null}
         <Form layout="vertical" onFinish={onFinish} style={{ marginTop: 16 }} requiredMark={false}>
-          <Form.Item
-            label="Email"
-            name="email"
-            initialValue="superadmin@hippo.example"
-            rules={[{ required: true, type: 'email' }]}
-          >
-            <Input size="large" />
+          <Form.Item label="Email" name="email" rules={[{ required: true, type: 'email' }]}>
+            <Input size="large" placeholder="superadmin@company.com" autoComplete="username" />
           </Form.Item>
-          <Form.Item
-            label="Password"
-            name="password"
-            initialValue="SuperAdmin@12345"
-            rules={[{ required: true }]}
-          >
-            <Input.Password size="large" />
+          <Form.Item label="Password" name="password" rules={[{ required: true }]}>
+            <Input.Password size="large" autoComplete="current-password" />
           </Form.Item>
           <Button type="primary" htmlType="submit" block size="large" loading={loading}>
             Sign in

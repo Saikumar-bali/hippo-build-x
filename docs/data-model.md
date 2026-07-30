@@ -1,217 +1,199 @@
 # Data Model
 
-## Control Plane Schema (`public`)
+## Locked multi-tenancy boundary
 
-Manages tenant registry and global configuration. See DEC-007.
+Hippo Build X uses a shared PostgreSQL/Neon database with two kinds of schemas:
+
+```text
+control_plane
+  Shared SaaS registry, platform identity, provisioning and encrypted channel metadata
+
+tenant_<immutableTenantUuid>
+  One isolated business schema per tenant
+```
+
+`public` is not an application data store. During the rolling migration from the early Phase 0 prototype, read-only compatibility views may exist temporarily for `tenants`, `tenant_migrations` and `platform_users`.
+
+New schemas are generated from the immutable tenant UUID, without hyphens:
+
+```text
+tenant id: 550e8400-e29b-41d4-a716-446655440000
+schema:    tenant_550e8400e29b41d4a716446655440000
+```
+
+Existing slug-named schemas remain valid and are resolved through the control plane. Slugs are login/URL labels; they never select a database schema.
+
+## Control plane schema (`control_plane`)
 
 ### tenants
 
-| Column | Type | Description |
+| Column | Type | Purpose |
 |---|---|---|
-| id | uuid | Primary key |
-| name | varchar(255) | Tenant display name |
-| slug | varchar(100) | URL-safe identifier |
-| schema_name | varchar(100) | PostgreSQL schema name (`tenant_<slug>`) |
+| id | uuid | Immutable tenant identity |
+| name | varchar(255) | Organization display name |
+| slug | varchar(100) | Login and URL identifier |
+| schema_name | varchar(100) | Current shared-schema locator |
 | status | varchar(50) | `provisioning`, `active`, `failed`, `suspended` |
-| branding | jsonb | Logo, colors, custom branding |
-| feature_flags | jsonb | Enabled features |
-| created_at | timestamptz | Creation timestamp |
-| updated_at | timestamptz | Last update timestamp |
-| deleted_at | timestamptz | Soft delete timestamp |
+| isolation_mode | varchar(50) | `shared_schema` or future `dedicated_database` |
+| database_secret_ref | text | P2 secret-manager locator; never a plaintext URL |
+| database_region | varchar(100) | Data residency/region metadata |
+| migration_version | varchar(255) | Latest applied tenant migration |
+| data_location_status | varchar(50) | Provisioning/migration readiness |
+| branding | jsonb | Legacy mirror; tenant-owned branding is in `tenant_settings` |
+| feature_flags | jsonb | Legacy mirror; tenant-owned flags are in `tenant_settings` |
+| created_at / updated_at | timestamptz | Lifecycle timestamps |
+| deleted_at | timestamptz | Soft deletion marker |
 
 ### platform_users
 
-Control-plane super admins (not tenant-scoped). Can create/list tenants via `/api/v1/platform/*`.
+Platform super administrators. These identities never live in a tenant schema and receive tokens with `scope=platform`.
 
-| Column | Type | Description |
+| Column | Type | Purpose |
 |---|---|---|
-| id | uuid | Primary key |
-| email | varchar(255) | Unique login email |
+| id | uuid | Platform user identity |
+| email | varchar(255) | Unique login |
 | name | varchar(255) | Display name |
-| password_hash | text | Argon2id hash |
-| role | varchar(50) | `super_admin` |
-| status | varchar(50) | `active`, `suspended` |
-| created_at | timestamptz | Creation timestamp |
-| updated_at | timestamptz | Last update timestamp |
-| deleted_at | timestamptz | Soft delete timestamp |
+| password_hash | text | Argon2id password hash |
+| role | varchar(50) | Currently `super_admin` |
+| status | varchar(50) | `active` or `suspended` |
+| created_at / updated_at | timestamptz | Lifecycle timestamps |
+| deleted_at | timestamptz | Soft deletion marker |
 
-### tenant_migrations
+### provisioning_jobs
 
-Tracks which migrations have been applied to each tenant schema.
+Durable source of truth for tenant provisioning attempts. BullMQ is the delivery mechanism, not the job record.
 
-| Column | Type | Description |
+| Column | Type | Purpose |
 |---|---|---|
-| id | uuid | Primary key |
-| tenant_id | uuid | FK to tenants |
-| migration_name | varchar(255) | Migration identifier |
-| applied_at | timestamptz | When applied |
+| id | uuid | Provisioning attempt identity |
+| tenant_id | uuid | Tenant being provisioned |
+| idempotency_key | varchar(255) | Prevents duplicate create/retry requests |
+| status | varchar(50) | `queued`, `running`, `completed`, `failed` |
+| current_step | varchar(80) | Last completed/current state-machine step |
+| attempt_count | integer | Worker execution attempts |
+| bullmq_job_id | varchar(255) | Deterministic queue locator |
+| requested_by | uuid | Platform user who requested it |
+| error_code / error_message | text | Operator-safe failure information |
+| payload | jsonb | Non-secret provisioning input |
+| started_at / finished_at | timestamptz | Attempt timing |
 
-## Tenant Schema (per-tenant)
+Provisioning state machine:
 
-Each tenant schema (`tenant_<slug>`) contains the following base tables:
-
-### users
-
-| Column | Type | Description |
-|---|---|---|
-| id | uuid | Primary key |
-| tenant_id | uuid | Tenant reference |
-| email | varchar(255) | User email |
-| name | varchar(255) | Display name |
-| password_hash | text | Password hash |
-| status | varchar(50) | active, inactive, suspended |
-| created_at | timestamptz | Creation timestamp |
-| updated_at | timestamptz | Last update timestamp |
-| deleted_at | timestamptz | Soft delete timestamp |
-
-### roles
-
-| Column | Type | Description |
-|---|---|---|
-| id | uuid | Primary key |
-| tenant_id | uuid | Tenant reference |
-| name | varchar(100) | Role name |
-| description | text | Role description |
-| permissions | jsonb | Array of permission strings |
-| is_system | boolean | System role (cannot delete) |
-
-### user_roles
-
-| Column | Type | Description |
-|---|---|---|
-| id | uuid | Primary key |
-| tenant_id | uuid | Tenant reference |
-| user_id | uuid | FK to users |
-| role_id | uuid | FK to roles |
-| project_id | uuid | Optional project scope |
-| location_id | uuid | Optional location scope |
-
-### audit_log
-
-| Column | Type | Description |
-|---|---|---|
-| id | uuid | Primary key |
-| tenant_id | uuid | Tenant reference |
-| action | varchar(100) | create, update, delete, login, logout |
-| entity_type | varchar(100) | user, role, lead, payment, etc. |
-| entity_id | uuid | ID of the affected entity |
-| actor_id | uuid | Who performed the action |
-| before | jsonb | State before change |
-| after | jsonb | State after change |
-| correlation_id | uuid | Request correlation |
-| ip_address | varchar(45) | Source IP |
-
-### sessions (Phase 1)
-
-| Column | Type | Description |
-|---|---|---|
-| id | uuid | Primary key |
-| user_id | uuid | FK to users |
-| refresh_token_hash | text | SHA-256 of opaque refresh token |
-| expires_at | timestamptz | Expiry |
-| revoked_at | timestamptz | Set on logout / rotation |
-
-### password_reset_tokens (Phase 1)
-
-| Column | Type | Description |
-|---|---|---|
-| id | uuid | Primary key |
-| user_id | uuid | FK to users |
-| token_hash | text | SHA-256 of reset token |
-| expires_at | timestamptz | Expiry |
-| used_at | timestamptz | When consumed |
-
-### tenant_settings (Phase 1)
-
-| Column | Type | Description |
-|---|---|---|
-| branding | jsonb | App name, colors, logo |
-| feature_flags | jsonb | Module flags |
-| channel_config_encrypted | text | AES-GCM encrypted channel secrets |
-
-### projects / locations (Phase 1 stubs → Phase 2)
-
-`projects` expanded with dates/budget/address. `locations` remain RBAC scope rows, synced from towers.
-
-### Phase 2 hierarchy
-
-| Table | Purpose |
-|---|---|
-| blocks | Project → block |
-| towers | Block/tower; syncs `locations` for RBAC |
-| floors | Tower floors |
-| unit_categories | 2BHK/3BHK etc. |
-| units | Unique (project,tower,floor,unit_number); status available/reserved/sold/blocked |
-| unit_status_history | Audited status transitions |
-| milestones / tasks / task_dependencies | Planning + FS deps (cycle-checked) |
-| boq_items | Bill of quantities |
-| drawings | Immutable versions per drawing_number |
-| rfis / issues / approvals | Site coordination |
-
-## ER Diagram
-
-```mermaid
-erDiagram
-  tenants ||--o{ tenant_migrations : tracks
-  tenants {
-    uuid id PK
-    varchar name
-    varchar slug UK
-    varchar schema_name UK
-    varchar status
-    jsonb branding
-    jsonb feature_flags
-    timestamptz created_at
-    timestamptz updated_at
-    timestamptz deleted_at
-  }
-  tenant_migrations {
-    uuid id PK
-    uuid tenant_id FK
-    varchar migration_name
-    timestamptz applied_at
-  }
-
-  users ||--o{ user_roles : has
-  roles ||--o{ user_roles : grants
-  users ||--o{ audit_log : acts
-
-  users {
-    uuid id PK
-    uuid tenant_id
-    varchar email
-    varchar name
-    text password_hash
-    varchar status
-  }
-  roles {
-    uuid id PK
-    uuid tenant_id
-    varchar name
-    jsonb permissions
-    boolean is_system
-  }
-  user_roles {
-    uuid id PK
-    uuid tenant_id
-    uuid user_id FK
-    uuid role_id FK
-    uuid project_id
-    uuid location_id
-  }
-  audit_log {
-    uuid id PK
-    uuid tenant_id
-    varchar action
-    varchar entity_type
-    uuid entity_id
-    uuid actor_id
-    jsonb before
-    jsonb after
-    uuid correlation_id
-  }
+```text
+registered
+→ queued
+→ starting
+→ schema_created
+→ migrations_applied
+→ defaults_seeded
+→ channel_record_created
+→ active
 ```
 
-> Note: `users`, `roles`, `user_roles`, and `audit_log` live inside each tenant schema, not in `public`.
+A failure preserves the tenant schema for diagnosis and idempotent retry. Schema deletion is an explicit operator action, not an automatic worker response.
 
-See individual module RFCs for additional tables.
+### tenant_channels
+
+Encrypted per-tenant notification provider credentials.
+
+| Column | Type | Purpose |
+|---|---|---|
+| tenant_id | uuid | Owning tenant |
+| channel_type | varchar(50) | `email`, `sms`, `whatsapp`, or provisioning placeholder |
+| provider | varchar(100) | Brevo, SMTP, Twilio, Meta, etc. |
+| encrypted_credentials | text | AES-256-GCM ciphertext |
+| encryption_key_version | varchar(50) | Key-rotation identifier |
+| non_secret_config | jsonb | Sender IDs, from address and provider metadata |
+| enabled | boolean | Tenant-owned enablement |
+| verification_status | varchar(50) | `not_configured`, `pending_verification`, `verified`, `failed` |
+| last_verified_at | timestamptz | Provider verification timestamp |
+
+Credential encryption uses tenant ID plus channel type as authenticated associated data. Ciphertext copied to another tenant/channel cannot be decrypted. APIs return masked secrets only.
+
+### Migration ledgers
+
+- `control_plane.control_plane_migrations`: control-plane migration names and checksums.
+- `control_plane.tenant_migrations`: fleet-level tenant migration summary.
+- `tenant_<id>._tenant_migrations`: local migration source of truth, enabling future database-per-tenant movement.
+
+Changing an already-recorded migration checksum is a deployment error. New changes require a new migration file.
+
+### Phase 12 reserved tables
+
+`plans`, `subscriptions` and platform-forced `feature_flags` are structurally reserved in the control plane. Their CRUD, entitlement enforcement, suspend/resume and subscription lifecycle remain Phase 12 per DEC-009.
+
+## Tenant schema
+
+Every business table belongs to one `tenant_<id>` schema. Core tables currently include:
+
+| Area | Tables |
+|---|---|
+| Identity | `users`, `sessions`, `password_reset_tokens` |
+| Authorization | `roles`, `user_roles` |
+| Tenant configuration | `tenant_settings` |
+| Audit | `audit_log` |
+| Property | `projects`, `locations`, `blocks`, `towers`, `floors`, `unit_categories`, `units`, `unit_status_history` |
+| Planning | `milestones`, `tasks`, `task_dependencies`, `boq_items` |
+| Site coordination | `drawings`, `rfis`, `issues`, `approvals` |
+| Later phases | leads, bookings, progress, materials, purchase orders, invoices and all other business records |
+
+Tenant tables retain a `tenant_id` column as defense in depth even though the schema is already isolated.
+
+## Request and query lifecycle
+
+```text
+JWT tenantId
+  ↓
+control_plane.tenants
+  ↓
+status + isolation_mode + authoritative schema/database locator
+  ↓
+transaction-local tenant SQL context
+  ↓
+SET LOCAL search_path = tenant_schema, pg_catalog
+SET LOCAL app.tenant_id = tenant UUID
+  ↓
+schema isolation + forced tenant RLS
+```
+
+Tokens never contain trusted schema names, database connection URLs or permission arrays. Permissions, project scope and location scope are reloaded from the tenant schema on each authenticated request.
+
+## Forced row-level security
+
+Every tenant table containing `tenant_id` receives a forced policy equivalent to:
+
+```sql
+USING (
+  tenant_id = '<schema-owner-tenant-id>'::uuid
+  AND tenant_id = current_setting('app.tenant_id')::uuid
+)
+WITH CHECK (
+  tenant_id = '<schema-owner-tenant-id>'::uuid
+  AND tenant_id = current_setting('app.tenant_id')::uuid
+)
+```
+
+This blocks both forms of hostile access:
+
+1. Tenant B querying `tenant_A.users` with a schema-qualified SQL statement.
+2. Tenant B inserting either Tenant B’s ID or a spoofed Tenant A ID into Tenant A’s schema.
+
+Production and CI runtime roles must be `NOSUPERUSER NOBYPASSRLS`. Migration/operator credentials must be separate from normal application credentials.
+
+## Database-per-tenant path (P2)
+
+The application always resolves storage from `tenantId`. A future large tenant can switch from:
+
+```text
+isolation_mode = shared_schema
+schema_name = tenant_<uuid>
+```
+
+To:
+
+```text
+isolation_mode = dedicated_database
+database_secret_ref = secret-manager reference
+```
+
+No access-token format, user identity or API route changes are required. Promotion uses a controlled write pause, destination migration, data copy, checksum verification, locator switch, smoke test and rollback window.

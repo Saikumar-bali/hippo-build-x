@@ -4,7 +4,7 @@ import { requireAuthContext } from '@/lib/tenant-context.js';
 
 export const GET = withApiHandler({ auth: true }, async () => {
   const ctx = requireAuthContext();
-  const authz = await loadUserAuthz(ctx.schemaName, ctx.userId);
+  const authz = await loadUserAuthz(ctx.schemaName, ctx.userId, ctx.tenantId);
   return successResponse({
     user: authz.user,
     roles: authz.roles,

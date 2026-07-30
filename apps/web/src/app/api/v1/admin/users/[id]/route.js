@@ -74,7 +74,7 @@ export const PATCH = withApiHandler(
     }
 
     if (body.status === 'suspended' || body.status === 'inactive') {
-      await revokeAllUserSessions(ctx.schemaName, id);
+      await revokeAllUserSessions(ctx.schemaName, ctx.tenantId, id);
     }
 
     if (body.roleId) {
@@ -118,7 +118,7 @@ export const DELETE = withApiHandler(
       `UPDATE users SET deleted_at = NOW(), status = 'inactive', updated_at = NOW() WHERE id = $1`,
       [id],
     );
-    await revokeAllUserSessions(ctx.schemaName, id);
+    await revokeAllUserSessions(ctx.schemaName, ctx.tenantId, id);
     return successResponse({ ok: true });
   },
 );

@@ -1,171 +1,238 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { getSql, closeDb } from '../client.js';
+import { getSql, getMigrationSql, closeDb } from '../client.js';
 import { TENANT_STATUS } from '../schema/control-plane.js';
-import { toSchemaName, assertSafeSchemaName } from './schema-name.js';
+import { toSchemaName, toTenantSchemaName, assertSafeSchemaName } from './schema-name.js';
 import { seedTenantDefaults } from '../seed/defaults.js';
 
-export { toSchemaName, assertSafeSchemaName, seedTenantDefaults };
+export { toSchemaName, toTenantSchemaName, assertSafeSchemaName, seedTenantDefaults };
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = dirname(fileURLToPath(import.meta.url));
+const CONTROL_MIGRATION_LOCK = 864203501;
+const filesIn = (dir) => readdirSync(dir).filter((file) => file.endsWith('.sql')).sort();
+const bodyOf = (dir, file) => readFileSync(join(dir, file), 'utf8');
+const checksumOf = (body) => createHash('sha256').update(body).digest('hex');
 
-function listSqlFiles(dir) {
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
+function quotedRuntimeRole() {
+  const role = process.env.DATABASE_RUNTIME_ROLE;
+  if (!role) return null;
+  if (!/^[a-z_][a-z0-9_]*$/i.test(role)) throw new Error('Invalid DATABASE_RUNTIME_ROLE');
+  return `"${role}"`;
 }
 
-function readMigration(dir, name) {
-  return readFileSync(join(dir, name), 'utf8');
-}
+async function grantRuntimeAccess(tx, schemaName) {
+  const role = quotedRuntimeRole();
+  if (!role) return;
+  const schema = `"${schemaName}"`;
+  await tx.unsafe(`GRANT USAGE ON SCHEMA ${schema} TO ${role}`);
+  await tx.unsafe(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA ${schema} TO ${role}`);
+  await tx.unsafe(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ${schema} TO ${role}`);
+  await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${role}`);
+  await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT USAGE, SELECT ON SEQUENCES TO ${role}`);
 
-/**
- * Apply pending control-plane migrations to the public schema.
- */
-export async function runControlPlaneMigrations() {
-  const sql = getSql();
-  const dir = join(__dirname, 'control');
-  const files = listSqlFiles(dir);
-
-  await sql.unsafe(`
-    CREATE TABLE IF NOT EXISTS control_plane_migrations (
-      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-      migration_name VARCHAR(255) NOT NULL UNIQUE,
-      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-    )
-  `);
-
-  const applied = await sql`
-    SELECT migration_name FROM control_plane_migrations
-  `;
-  const appliedSet = new Set(applied.map((r) => r.migration_name));
-
-  for (const file of files) {
-    if (appliedSet.has(file)) continue;
-    const body = readMigration(dir, file);
-    await sql.begin(async (tx) => {
-      await tx.unsafe(body);
-      await tx`
-        INSERT INTO control_plane_migrations (migration_name)
-        VALUES (${file})
-        ON CONFLICT (migration_name) DO NOTHING
-      `;
-    });
+  // Compatibility views live in public for one rolling-release window. Views
+  // have independent ACLs, so granting the underlying control-plane tables is
+  // insufficient for older instances whose search path still resolves here.
+  if (schemaName === 'control_plane') {
+    const compatibilityViews = await tx`
+      SELECT table_name
+      FROM information_schema.views
+      WHERE table_schema = 'public'
+        AND table_name IN ('tenants', 'tenant_migrations', 'platform_users')
+      ORDER BY table_name
+    `;
+    if (compatibilityViews.length) {
+      const qualifiedViews = compatibilityViews
+        .map((row) => `public."${row.table_name}"`)
+        .join(', ');
+      await tx.unsafe(`GRANT USAGE ON SCHEMA public TO ${role}`);
+      await tx.unsafe(`GRANT SELECT ON ${qualifiedViews} TO ${role}`);
+    }
   }
-
-  return { applied: files.filter((f) => !appliedSet.has(f)), total: files.length };
 }
 
-/**
- * Run pending tenant migrations for a schema.
- * @param {string} schemaName
- * @param {string} [tenantId]
- */
+export async function runControlPlaneMigrations() {
+  const sql = getMigrationSql();
+  const dir = join(root, 'control');
+  const files = filesIn(dir);
+
+  return sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(${CONTROL_MIGRATION_LOCK})`;
+    await tx.unsafe('CREATE EXTENSION IF NOT EXISTS "pgcrypto"');
+    await tx.unsafe('CREATE SCHEMA IF NOT EXISTS control_plane');
+    await tx.unsafe(`
+      CREATE TABLE IF NOT EXISTS control_plane.control_plane_migrations (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        migration_name VARCHAR(255) NOT NULL UNIQUE,
+        checksum VARCHAR(64),
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await tx.unsafe(`ALTER TABLE control_plane.control_plane_migrations ADD COLUMN IF NOT EXISTS checksum VARCHAR(64)`);
+    await tx.unsafe(`
+      DO $$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = 'public' AND c.relname = 'control_plane_migrations' AND c.relkind = 'r'
+        ) THEN
+          INSERT INTO control_plane.control_plane_migrations (migration_name, applied_at)
+          SELECT migration_name, applied_at FROM public.control_plane_migrations
+          ON CONFLICT (migration_name) DO NOTHING;
+        END IF;
+      END $$
+    `);
+
+    const applied = await tx`SELECT migration_name, checksum FROM control_plane.control_plane_migrations`;
+    const known = new Map(applied.map((row) => [row.migration_name, row.checksum]));
+    const added = [];
+    for (const file of files) {
+      const body = bodyOf(dir, file);
+      const checksum = checksumOf(body);
+      if (known.has(file)) {
+        const old = known.get(file);
+        if (old && old !== checksum) throw new Error(`Control-plane migration checksum changed: ${file}`);
+        if (!old) await tx`UPDATE control_plane.control_plane_migrations SET checksum = ${checksum} WHERE migration_name = ${file}`;
+        continue;
+      }
+      await tx.unsafe(body);
+      await tx`INSERT INTO control_plane.control_plane_migrations (migration_name, checksum) VALUES (${file}, ${checksum})`;
+      added.push(file);
+    }
+    await grantRuntimeAccess(tx, 'control_plane');
+    return { applied: added, total: files.length };
+  });
+}
+
+async function enforceTenantRls(tx, tenantId) {
+  await tx.unsafe(`
+    DO $$ DECLARE target RECORD; qualified TEXT; expected_tenant UUID := current_setting('app.tenant_id')::uuid;
+    BEGIN
+      FOR target IN
+        SELECT t.table_schema, t.table_name FROM information_schema.tables t
+        WHERE t.table_schema = current_schema() AND t.table_type = 'BASE TABLE'
+        AND EXISTS (SELECT 1 FROM information_schema.columns c WHERE c.table_schema = t.table_schema AND c.table_name = t.table_name AND c.column_name = 'tenant_id')
+      LOOP
+        qualified := format('%I.%I', target.table_schema, target.table_name);
+        EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', qualified);
+        EXECUTE format('ALTER TABLE %s FORCE ROW LEVEL SECURITY', qualified);
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', qualified);
+        EXECUTE format(
+          'CREATE POLICY tenant_isolation ON %s USING (tenant_id = %L::uuid AND tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) WITH CHECK (tenant_id = %L::uuid AND tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
+          qualified, expected_tenant, expected_tenant
+        );
+      END LOOP;
+    END $$
+  `);
+  await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+}
+
 export async function runTenantMigrations(schemaName, tenantId) {
   assertSafeSchemaName(schemaName);
-  const sql = getSql();
-  const dir = join(__dirname, 'tenant');
-  const files = listSqlFiles(dir);
+  if (!tenantId) throw new Error('tenantId is required to run tenant migrations');
+  const sql = getMigrationSql();
+  const dir = join(root, 'tenant');
+  const files = filesIn(dir);
 
-  await sql.unsafe(`SET search_path TO "${schemaName}", public`);
+  return sql.begin(async (tx) => {
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${schemaName}))`;
+    await tx.unsafe(`SET LOCAL search_path TO "${schemaName}", pg_catalog`);
+    await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+    await tx.unsafe(`CREATE TABLE IF NOT EXISTS _tenant_migrations (migration_name VARCHAR(255) PRIMARY KEY, checksum VARCHAR(64), applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
 
-  let appliedSet = new Set();
-  if (tenantId) {
-    const applied = await sql`
-      SELECT migration_name FROM public.tenant_migrations
-      WHERE tenant_id = ${tenantId}
-    `;
-    appliedSet = new Set(applied.map((r) => r.migration_name));
-  }
+    const central = await tx`SELECT migration_name, checksum, applied_at FROM control_plane.tenant_migrations WHERE tenant_id = ${tenantId}`;
+    for (const row of central) {
+      await tx`INSERT INTO _tenant_migrations (migration_name, checksum, applied_at) VALUES (${row.migration_name}, ${row.checksum}, ${row.applied_at}) ON CONFLICT DO NOTHING`;
+    }
+    const applied = await tx`SELECT migration_name, checksum FROM _tenant_migrations`;
+    const known = new Map(applied.map((row) => [row.migration_name, row.checksum]));
+    const added = [];
 
-  const newlyApplied = [];
-  for (const file of files) {
-    if (appliedSet.has(file)) continue;
-    const body = readMigration(dir, file);
-    await sql.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL search_path TO "${schemaName}", public`);
-      await tx.unsafe(body);
-      if (tenantId) {
-        await tx`
-          INSERT INTO public.tenant_migrations (tenant_id, migration_name)
-          VALUES (${tenantId}, ${file})
-          ON CONFLICT (tenant_id, migration_name) DO NOTHING
-        `;
+    for (const file of files) {
+      const body = bodyOf(dir, file);
+      const checksum = checksumOf(body);
+      if (known.has(file)) {
+        const old = known.get(file);
+        if (old && old !== checksum) throw new Error(`Tenant migration checksum changed for ${schemaName}: ${file}`);
+        if (!old) {
+          await tx`UPDATE _tenant_migrations SET checksum = ${checksum} WHERE migration_name = ${file}`;
+          await tx`UPDATE control_plane.tenant_migrations SET checksum = ${checksum} WHERE tenant_id = ${tenantId} AND migration_name = ${file}`;
+        }
+        continue;
       }
-    });
-    newlyApplied.push(file);
-  }
+      await tx.unsafe(body);
+      await tx`INSERT INTO _tenant_migrations (migration_name, checksum) VALUES (${file}, ${checksum})`;
+      await tx`INSERT INTO control_plane.tenant_migrations (tenant_id, migration_name, checksum) VALUES (${tenantId}, ${file}, ${checksum}) ON CONFLICT (tenant_id, migration_name) DO UPDATE SET checksum = EXCLUDED.checksum`;
+      added.push(file);
+    }
 
-  await sql.unsafe(`SET search_path TO public`);
-  return { applied: newlyApplied, total: files.length };
+    await enforceTenantRls(tx, tenantId);
+    await grantRuntimeAccess(tx, schemaName);
+    const migrationVersion = files.at(-1) || null;
+    await tx`UPDATE control_plane.tenants SET migration_version = ${migrationVersion}, updated_at = NOW() WHERE id = ${tenantId}`;
+    return { applied: added, total: files.length, migrationVersion };
+  });
 }
 
-/**
- * Provision a new tenant schema with all required tables and defaults.
- * Idempotent — safe to retry.
- * @param {string} tenantId
- * @param {string} schemaName
- * @param {{ adminEmail?: string, adminName?: string, password?: string, seedDemoUsers?: boolean }} [options]
- */
+export async function runTenantMigrationFleet({ statuses = ['active'], continueOnError = false } = {}) {
+  const sql = getMigrationSql();
+  const tenants = await sql`
+    SELECT id, schema_name, slug FROM control_plane.tenants
+    WHERE deleted_at IS NULL
+      AND isolation_mode = 'shared_schema'
+      AND status = ANY(${statuses})
+    ORDER BY created_at
+  `;
+  const results = [];
+  for (const tenant of tenants) {
+    try {
+      const result = await runTenantMigrations(tenant.schema_name, tenant.id);
+      results.push({ tenantId: tenant.id, slug: tenant.slug, ok: true, ...result });
+    } catch (error) {
+      results.push({ tenantId: tenant.id, slug: tenant.slug, ok: false, error: error.message });
+      if (!continueOnError) throw error;
+    }
+  }
+  return results;
+}
+
 export async function provisionTenantSchema(tenantId, schemaName, options = {}) {
   assertSafeSchemaName(schemaName);
-  const sql = getSql();
-
-  await sql.unsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
+  const migrationSql = getMigrationSql();
+  const onStep = typeof options.onStep === 'function' ? options.onStep : async () => {};
+  await migrationSql.unsafe(`CREATE SCHEMA IF NOT EXISTS "${schemaName}"`);
+  await onStep('schema_created');
   await runTenantMigrations(schemaName, tenantId);
+  await onStep('migrations_applied');
   await seedTenantDefaults(schemaName, tenantId, {
     email: options.adminEmail,
     name: options.adminName,
     password: options.password,
     seedDemoUsers: options.seedDemoUsers,
   });
-
-  await sql`
-    UPDATE tenants
-    SET status = ${TENANT_STATUS.ACTIVE}, updated_at = NOW()
-    WHERE id = ${tenantId}
-  `;
-
+  await onStep('defaults_seeded');
+  await migrationSql`INSERT INTO control_plane.tenant_channels (tenant_id, channel_type, provider, verification_status) VALUES (${tenantId}, 'default', 'unconfigured', 'not_configured') ON CONFLICT (tenant_id, channel_type) DO NOTHING`;
+  await onStep('channel_record_created');
+  await migrationSql`UPDATE control_plane.tenants SET status = ${TENANT_STATUS.ACTIVE}, data_location_status = 'ready', updated_at = NOW() WHERE id = ${tenantId}`;
+  await onStep('active');
   return { tenantId, schemaName, status: TENANT_STATUS.ACTIVE };
 }
 
-/**
- * Rollback a failed tenant provisioning by dropping the schema and marking failed.
- * @param {string} schemaName
- * @param {string} [tenantId]
- */
 export async function rollbackTenantProvisioning(schemaName, tenantId) {
   assertSafeSchemaName(schemaName);
-  const sql = getSql();
-
+  const sql = getMigrationSql();
   await sql.unsafe(`DROP SCHEMA IF EXISTS "${schemaName}" CASCADE`);
-
   if (tenantId) {
-    await sql`
-      DELETE FROM tenant_migrations WHERE tenant_id = ${tenantId}
-    `;
-    await sql`
-      UPDATE tenants
-      SET status = ${TENANT_STATUS.FAILED}, updated_at = NOW()
-      WHERE id = ${tenantId}
-    `;
+    await sql`DELETE FROM control_plane.tenant_migrations WHERE tenant_id = ${tenantId}`;
+    await sql`UPDATE control_plane.tenants SET status = ${TENANT_STATUS.FAILED}, data_location_status = 'rollback_complete', updated_at = NOW() WHERE id = ${tenantId}`;
   }
-
   return { schemaName, status: TENANT_STATUS.FAILED };
 }
 
-/**
- * Check whether control-plane baseline is applied.
- */
 export async function isControlPlaneReady() {
-  const sql = getSql();
   try {
-    const rows = await sql`
-      SELECT 1 FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_name = 'tenants'
-      LIMIT 1
-    `;
+    const rows = await getSql()`SELECT 1 FROM information_schema.tables WHERE table_schema = 'control_plane' AND table_name = 'tenants' LIMIT 1`;
     return rows.length > 0;
   } catch {
     return false;

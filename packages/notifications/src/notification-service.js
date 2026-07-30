@@ -1,5 +1,3 @@
-import { NotificationChannel } from './adapters/index.js';
-
 /**
  * Notification service that dispatches through registered adapters.
  * Handles retry logic and dead-letter tracking.

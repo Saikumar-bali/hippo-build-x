@@ -88,12 +88,17 @@ export default function ProjectsPage() {
             {
               title: 'Status',
               dataIndex: 'status',
-              render: (v) => <Tag color={v === 'active' ? 'green' : 'default'}>{v}</Tag>,
+              render: (value) => (
+                <Tag color={value === 'active' ? 'green' : 'default'}>{value}</Tag>
+              ),
             },
             {
               title: 'Budget',
               dataIndex: 'budget',
-              render: (v) => (v != null ? Number(v).toLocaleString() : '—'),
+              render: (value) =>
+                value !== null && value !== undefined
+                  ? Number(value).toLocaleString()
+                  : '—',
             },
           ]}
         />
