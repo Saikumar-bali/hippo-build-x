@@ -25,10 +25,6 @@ function migrationChecksum(body) {
   return createHash('sha256').update(body).digest('hex');
 }
 
-/**
- * Apply pending control-plane migrations to the explicit control_plane schema.
- * Legacy public migration rows are imported once for existing installations.
- */
 export async function runControlPlaneMigrations() {
   const sql = getSql();
   const dir = join(__dirname, 'control');
@@ -142,6 +138,7 @@ async function enforceTenantRls(sql, schemaName, tenantId) {
       DECLARE
         target RECORD;
         qualified TEXT;
+        expected_tenant UUID := current_setting('app.tenant_id')::uuid;
       BEGIN
         FOR target IN
           SELECT t.table_schema, t.table_name
@@ -161,10 +158,12 @@ async function enforceTenantRls(sql, schemaName, tenantId) {
           EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', qualified);
           EXECUTE format(
             'CREATE POLICY tenant_isolation ON %s USING '
-            || '(tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) '
+            || '(tenant_id = %L::uuid AND tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) '
             || 'WITH CHECK '
-            || '(tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
-            qualified
+            || '(tenant_id = %L::uuid AND tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
+            qualified,
+            expected_tenant,
+            expected_tenant
           );
         END LOOP;
       END $$
@@ -172,11 +171,6 @@ async function enforceTenantRls(sql, schemaName, tenantId) {
   });
 }
 
-/**
- * Run pending tenant migrations for one tenant schema. Migration state is kept
- * locally for database-per-tenant portability and mirrored in control_plane for
- * fleet visibility.
- */
 export async function runTenantMigrations(schemaName, tenantId) {
   assertSafeSchemaName(schemaName);
   if (!tenantId) throw new Error('tenantId is required to run tenant migrations');
@@ -250,10 +244,6 @@ export async function runTenantMigrations(schemaName, tenantId) {
   return { applied: newlyApplied, total: files.length, migrationVersion };
 }
 
-/**
- * Provision a tenant idempotently. onStep allows the worker/UI to expose a
- * durable state machine without coupling database code to BullMQ.
- */
 export async function provisionTenantSchema(tenantId, schemaName, options = {}) {
   assertSafeSchemaName(schemaName);
   const sql = getSql();
@@ -293,10 +283,6 @@ export async function provisionTenantSchema(tenantId, schemaName, options = {}) 
   return { tenantId, schemaName, status: TENANT_STATUS.ACTIVE };
 }
 
-/**
- * Explicit destructive rollback for operator use. Automatic worker failures do
- * not drop schemas; retries resume idempotently from the durable job record.
- */
 export async function rollbackTenantProvisioning(schemaName, tenantId) {
   assertSafeSchemaName(schemaName);
   const sql = getSql();
