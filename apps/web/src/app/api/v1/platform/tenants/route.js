@@ -40,10 +40,59 @@ const SELECT_TENANTS = `
 `;
 
 function idempotentTenantQuery() {
-  return `${SELECT_TENANTS}
+  return `
+    SELECT
+      t.id, t.name, t.slug, t.schema_name, t.status, t.isolation_mode,
+      t.database_region, t.migration_version, t.data_location_status,
+      t.created_at, t.updated_at,
+      same_job.id AS provisioning_job_id,
+      same_job.status AS provisioning_job_status,
+      same_job.current_step AS provisioning_current_step,
+      same_job.attempt_count AS provisioning_attempt_count,
+      same_job.error_code AS provisioning_error_code,
+      same_job.error_message AS provisioning_error_message,
+      same_job.started_at AS provisioning_started_at,
+      same_job.finished_at AS provisioning_finished_at,
+      same_job.payload AS provisioning_job_payload
+    FROM tenants t
     JOIN provisioning_jobs same_job ON same_job.tenant_id = t.id
     WHERE same_job.idempotency_key = $1 AND t.deleted_at IS NULL
-    LIMIT 1`;
+    LIMIT 1
+  `;
+}
+
+function publicTenantState(row) {
+  if (!row) return row;
+  const { provisioning_job_payload: _payload, ...state } = row;
+  return state;
+}
+
+async function enqueueRegisteredCreation(replay) {
+  if (
+    replay.provisioning_job_status !== 'queued' ||
+    replay.provisioning_current_step !== 'registered'
+  ) {
+    return { mode: 'existing' };
+  }
+
+  const payload = replay.provisioning_job_payload || {};
+  return enqueueTenantProvision({
+    tenantId: replay.id,
+    schemaName: replay.schema_name,
+    slug: replay.slug,
+    adminEmail: payload.adminEmail,
+    adminName: payload.adminName,
+    provisioningJobId: replay.provisioning_job_id,
+  });
+}
+
+async function replayCreation(replay) {
+  const queued = await enqueueRegisteredCreation(replay);
+  return successResponse(
+    { ...publicTenantState(replay), provisionMode: queued.mode },
+    { idempotentReplay: true },
+    200,
+  );
 }
 
 export const GET = withApiHandler(
@@ -87,7 +136,7 @@ export const POST = withApiHandler(
       request.headers.get('idempotency-key') || `tenant-create:${slug.toLowerCase()}`;
 
     const previous = await sql.unsafe(idempotentTenantQuery(), [idempotencyKey]);
-    if (previous[0]) return successResponse(previous[0], { idempotentReplay: true }, 200);
+    if (previous[0]) return replayCreation(previous[0]);
 
     const tenantId = crypto.randomUUID();
     const schemaName = toTenantSchemaName(tenantId);
@@ -125,9 +174,7 @@ export const POST = withApiHandler(
       return { tenant, job };
     });
 
-    if (created.replay) {
-      return successResponse(created.replay, { idempotentReplay: true }, 200);
-    }
+    if (created.replay) return replayCreation(created.replay);
 
     const queued = await enqueueTenantProvision({
       tenantId,
