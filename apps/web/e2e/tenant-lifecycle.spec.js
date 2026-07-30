@@ -56,10 +56,18 @@ test.describe('Locked tenant lifecycle', () => {
       (response) =>
         response.url().includes('/api/v1/auth/login') && response.request().method() === 'POST',
     );
+    const authMe = page.waitForResponse(
+      (response) =>
+        response.url().includes('/api/v1/auth/me') && response.request().method() === 'GET',
+    );
     await page.getByRole('button', { name: 'Login' }).click();
     expect((await tenantLogin).status()).toBe(200);
 
     await page.waitForURL('**/dashboard', { timeout: 15000 });
+    const authMeResponse = await authMe;
+    expect(authMeResponse.status()).toBe(200);
+    const authMeBody = await authMeResponse.json();
+    expect(authMeBody.data?.tenant?.slug).toBe(tenantSlug);
     await expect(page.locator('.ant-layout-sider')).toBeVisible();
   });
 });
