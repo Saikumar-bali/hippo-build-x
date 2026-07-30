@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   runControlPlaneMigrations,
   closeDb,
-  getSql,
+  createControlPlaneSql,
   pingDatabase,
   isControlPlaneReady,
 } from '@hippo/db';
@@ -10,13 +10,8 @@ import {
 const hasDb = Boolean(process.env.DATABASE_URL);
 
 describe.skipIf(!hasDb)('database readiness helpers', () => {
-  beforeAll(async () => {
-    await runControlPlaneMigrations();
-  });
-
-  afterAll(async () => {
-    await closeDb();
-  });
+  beforeAll(async () => runControlPlaneMigrations());
+  afterAll(async () => closeDb());
 
   it('pingDatabase succeeds', async () => {
     await expect(pingDatabase()).resolves.toBe(true);
@@ -26,8 +21,8 @@ describe.skipIf(!hasDb)('database readiness helpers', () => {
     await expect(isControlPlaneReady()).resolves.toBe(true);
   });
 
-  it('control plane sql can query tenants', async () => {
-    const sql = getSql();
+  it('control-plane client can query tenants', async () => {
+    const sql = createControlPlaneSql();
     const rows = await sql`SELECT count(*)::int AS c FROM tenants`;
     expect(rows[0].c).toBeGreaterThanOrEqual(0);
   });
