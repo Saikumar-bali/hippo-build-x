@@ -1,4 +1,4 @@
-import { pgTable, uuid, varchar, timestamp, jsonb } from 'drizzle-orm/pg-core';
+import { pgTable, uuid, varchar, jsonb } from 'drizzle-orm/pg-core';
 import { tenantBaseColumns } from './tenant.js';
 
 /**
