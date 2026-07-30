@@ -49,6 +49,26 @@ describe.skipIf(!hasDb)('locked control plane migrations', () => {
         )
     `;
     expect(publicTables).toEqual([]);
+
+    const runtimeRole = process.env.DATABASE_RUNTIME_ROLE;
+    if (runtimeRole) {
+      const operator = getMigrationSql();
+      const [privileges] = await operator`
+        SELECT
+          has_schema_privilege(${runtimeRole}, 'public', 'USAGE') AS public_usage,
+          has_table_privilege(${runtimeRole}, 'public.tenants', 'SELECT') AS tenants_select,
+          has_table_privilege(${runtimeRole}, 'public.tenant_migrations', 'SELECT')
+            AS tenant_migrations_select,
+          has_table_privilege(${runtimeRole}, 'public.platform_users', 'SELECT')
+            AS platform_users_select
+      `;
+      expect(privileges).toEqual({
+        public_usage: true,
+        tenants_select: true,
+        tenant_migrations_select: true,
+        platform_users_select: true,
+      });
+    }
   });
 });
 
