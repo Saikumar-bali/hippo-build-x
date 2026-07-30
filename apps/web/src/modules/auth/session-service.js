@@ -2,6 +2,7 @@ import { createControlPlaneSql, createTenantSql } from '@hippo/db';
 import {
   signAccessToken,
   verifyPassword,
+  hashPassword,
   hashToken,
   generateToken,
   REFRESH_TTL_MS,
@@ -21,10 +22,6 @@ export function flattenPermissions(roles) {
   return [...set];
 }
 
-/**
- * Authorization is loaded from the tenant schema on every authenticated
- * request so role changes, suspension and scope changes take effect immediately.
- */
 export async function loadUserAuthz(schemaName, userId, tenantId) {
   const sql = createTenantSql(schemaName, tenantId);
   const users = await sql.unsafe(
@@ -76,8 +73,6 @@ export async function issueSession(authz, meta = {}) {
     ],
   );
 
-  // Storage locators and authorization arrays are intentionally absent. The
-  // request resolver reloads both from authoritative database state.
   const accessToken = await signAccessToken({
     sub: authz.userId,
     tenantId: authz.tenantId,
@@ -152,8 +147,6 @@ function parseRefreshToken(value) {
   if (parts.length < 2 || !/^[0-9a-f-]{36}$/i.test(parts[0])) {
     throw AppError.unauthorized('Invalid refresh token');
   }
-  // Legacy format was tenantId.schemaName.secret. Ignore the untrusted schema
-  // segment and resolve the current data source from the control plane.
   return {
     tenantId: parts[0],
     tokenBody: parts.length === 2 ? parts[1] : parts.slice(2).join('.'),
@@ -214,6 +207,59 @@ export async function rotateRefreshToken(rawRefresh, meta = {}) {
       isolationMode: tenant.isolation_mode,
     },
   };
+}
+
+export async function createPasswordResetToken(schemaName, tenantId, email) {
+  const sql = createTenantSql(schemaName, tenantId);
+  const users = await sql.unsafe(
+    `SELECT id FROM users
+     WHERE lower(email) = lower($1) AND status = 'active' AND deleted_at IS NULL LIMIT 1`,
+    [email],
+  );
+  if (!users[0]) return null;
+
+  const token = generateToken();
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  await sql.unsafe(
+    `INSERT INTO password_reset_tokens
+      (tenant_id, user_id, token_hash, expires_at)
+     VALUES ($1, $2, $3, $4)`,
+    [tenantId, users[0].id, hashToken(token), expiresAt.toISOString()],
+  );
+  return { token, expiresAt };
+}
+
+export async function resetPasswordWithToken(schemaName, tenantId, token, password) {
+  const sql = createTenantSql(schemaName, tenantId);
+  const passwordHash = await hashPassword(password);
+
+  await sql.begin(async (tx) => {
+    const rows = await tx.unsafe(
+      `SELECT id, user_id, expires_at, used_at
+       FROM password_reset_tokens
+       WHERE token_hash = $1 AND deleted_at IS NULL
+       FOR UPDATE`,
+      [hashToken(token)],
+    );
+    const reset = rows[0];
+    if (!reset || reset.used_at || new Date(reset.expires_at) < new Date()) {
+      throw AppError.validation('Invalid or expired reset token');
+    }
+
+    await tx.unsafe(
+      `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+      [passwordHash, reset.user_id],
+    );
+    await tx.unsafe(
+      `UPDATE password_reset_tokens SET used_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [reset.id],
+    );
+    await tx.unsafe(
+      `UPDATE sessions SET revoked_at = NOW(), updated_at = NOW()
+       WHERE user_id = $1 AND revoked_at IS NULL`,
+      [reset.user_id],
+    );
+  });
 }
 
 export async function revokeSession(schemaName, tenantId, sessionId) {
