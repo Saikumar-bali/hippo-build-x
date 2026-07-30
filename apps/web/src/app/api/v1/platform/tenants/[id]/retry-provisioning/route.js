@@ -53,8 +53,13 @@ export const POST = withApiHandler(
       throw new AppError(ErrorCode.TENANT_NOT_FOUND, 'Tenant not found', 404);
     }
     const tenant = rows[0];
-    if (tenant.status === TENANT_STATUS.ACTIVE) {
-      return successResponse({ ...tenant, message: 'Tenant is already active' });
+    if (tenant.status !== TENANT_STATUS.FAILED) {
+      throw new AppError(
+        ErrorCode.INVALID_STATE_TRANSITION,
+        `Provisioning can be retried only for failed tenants; current status is ${tenant.status}`,
+        409,
+        { tenantId: tenant.id, currentStatus: tenant.status, requiredStatus: TENANT_STATUS.FAILED },
+      );
     }
 
     const previousJobs = await sql`
@@ -121,6 +126,7 @@ export const POST = withApiHandler(
             data_location_status = 'retrying',
             updated_at = NOW()
         WHERE id = ${tenant.id}
+          AND status = ${TENANT_STATUS.FAILED}
       `;
       return { job, created: true };
     });
