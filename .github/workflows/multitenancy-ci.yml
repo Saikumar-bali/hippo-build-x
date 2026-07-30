@@ -6,6 +6,7 @@ on:
       - 'apps/web/**'
       - 'apps/worker/**'
       - 'packages/db/**'
+      - 'packages/shared/**'
       - 'scripts/e2e-phase0.js'
       - '.github/workflows/multitenancy-ci.yml'
   push:
@@ -14,6 +15,7 @@ on:
       - 'apps/web/**'
       - 'apps/worker/**'
       - 'packages/db/**'
+      - 'packages/shared/**'
       - 'scripts/e2e-phase0.js'
       - '.github/workflows/multitenancy-ci.yml'
 
@@ -36,25 +38,21 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hippo_test
-        ports:
-          - 5432:5432
+        ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U postgres -d hippo_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
-        ports:
-          - 6379:6379
+        ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-interval 5s --health-timeout 5s --health-retries 10
 
     env:
       DATABASE_URL: postgres://hippo_runtime:hippo@localhost:5432/hippo_test
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/hippo_test
+      DATABASE_RUNTIME_ROLE: hippo_runtime
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-access-secret-at-least-32-characters
       JWT_REFRESH_SECRET: ci-refresh-secret-at-least-32-characters
@@ -68,23 +66,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.4
+        with: { version: 9.15.4 }
       - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-      - name: Create non-superuser runtime role
-        env:
-          PGPASSWORD: postgres
+        with: { node-version: 20, cache: pnpm }
+      - name: Create restricted runtime role
+        env: { PGPASSWORD: postgres }
         run: |
           psql -h localhost -U postgres -d hippo_test -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE ROLE hippo_runtime LOGIN PASSWORD 'hippo' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-          ALTER DATABASE hippo_test OWNER TO hippo_runtime;
-          GRANT ALL ON SCHEMA public TO hippo_runtime;
+          CREATE ROLE hippo_runtime LOGIN PASSWORD 'hippo'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
           SQL
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Apply operator migrations
+        run: |
+          pnpm --filter @hippo/db db:migrate:control
+          pnpm --filter @hippo/db db:migrate:tenants
       - name: Database unit and hostile isolation tests
         run: pnpm --filter @hippo/db test
       - name: Auth, RBAC and property integration tests
@@ -107,25 +105,21 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hippo_e2e
-        ports:
-          - 5432:5432
+        ports: ['5432:5432']
         options: >-
           --health-cmd "pg_isready -U postgres -d hippo_e2e"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-interval 5s --health-timeout 5s --health-retries 10
       redis:
         image: redis:7-alpine
-        ports:
-          - 6379:6379
+        ports: ['6379:6379']
         options: >-
           --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
+          --health-interval 5s --health-timeout 5s --health-retries 10
 
     env:
       DATABASE_URL: postgres://hippo_runtime:hippo@localhost:5432/hippo_e2e
+      MIGRATION_DATABASE_URL: postgres://postgres:postgres@localhost:5432/hippo_e2e
+      DATABASE_RUNTIME_ROLE: hippo_runtime
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-access-secret-at-least-32-characters
       JWT_REFRESH_SECRET: ci-refresh-secret-at-least-32-characters
@@ -140,23 +134,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.4
+        with: { version: 9.15.4 }
       - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-      - name: Create non-superuser runtime role
-        env:
-          PGPASSWORD: postgres
+        with: { node-version: 20, cache: pnpm }
+      - name: Create restricted runtime role
+        env: { PGPASSWORD: postgres }
         run: |
           psql -h localhost -U postgres -d hippo_e2e -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE ROLE hippo_runtime LOGIN PASSWORD 'hippo' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
-          ALTER DATABASE hippo_e2e OWNER TO hippo_runtime;
-          GRANT ALL ON SCHEMA public TO hippo_runtime;
+          CREATE ROLE hippo_runtime LOGIN PASSWORD 'hippo'
+            NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+          REVOKE CREATE ON SCHEMA public FROM PUBLIC;
           SQL
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Apply control plane and active tenant fleet migrations
+        run: |
+          pnpm --filter @hippo/db db:migrate:control
+          pnpm --filter @hippo/db db:migrate:tenants
       - name: Install Chromium
         run: pnpm --filter @hippo/web exec playwright install --with-deps chromium
       - name: Seed control plane and demonstration tenant
@@ -166,9 +160,7 @@ jobs:
           pnpm --filter @hippo/web dev > /tmp/hippo-web.log 2>&1 &
           echo $! > /tmp/hippo-web.pid
           for attempt in {1..60}; do
-            if curl --fail --silent http://localhost:3000/api/v1/health >/dev/null; then
-              exit 0
-            fi
+            if curl --fail --silent http://localhost:3000/api/v1/health >/dev/null; then exit 0; fi
             sleep 2
           done
           cat /tmp/hippo-web.log
