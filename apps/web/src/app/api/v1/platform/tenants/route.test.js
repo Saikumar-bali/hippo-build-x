@@ -54,7 +54,7 @@ function makeQuery({ transaction = false } = {}) {
       return [state.tenant];
     }
     if (text.includes('INSERT INTO provisioning_jobs')) {
-      const [tenantId, idempotencyKey, _status, _step, _requestedBy, payload] = values;
+      const [tenantId, idempotencyKey, _requestedBy, payload] = values;
       state.job = {
         id: JOB_ID,
         tenant_id: tenantId,
