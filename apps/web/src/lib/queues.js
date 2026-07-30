@@ -52,6 +52,19 @@ async function updateJob(jobId, values) {
   );
 }
 
+async function markTenantProvisioningFailed(tenantId) {
+  if (!tenantId) return;
+  const sql = createControlPlaneSql();
+  await sql`
+    UPDATE tenants
+    SET status = 'failed',
+        data_location_status = 'attention_required',
+        updated_at = NOW()
+    WHERE id = ${tenantId}
+      AND status = 'provisioning'
+  `;
+}
+
 async function provisionSynchronously(payload) {
   await updateJob(payload.provisioningJobId, {
     status: 'running',
@@ -73,6 +86,7 @@ async function provisionSynchronously(payload) {
     });
     return { mode: 'sync', result };
   } catch (error) {
+    await markTenantProvisioningFailed(payload.tenantId);
     await updateJob(payload.provisioningJobId, {
       status: 'failed',
       currentStep: 'failed',
@@ -121,6 +135,7 @@ export async function enqueueTenantProvision(payload) {
     return { mode: 'queue', bullmqJobId };
   } catch (error) {
     if (!shouldSyncProvision(error)) {
+      await markTenantProvisioningFailed(payload.tenantId);
       await updateJob(payload.provisioningJobId, {
         status: 'failed',
         currentStep: 'queue_failed',
