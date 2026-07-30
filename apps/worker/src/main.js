@@ -57,6 +57,52 @@ async function updateProvisioningJob(jobId, values) {
   );
 }
 
+function warnReportingFailure({ error, currentStep, channel, tenantId, provisioningJobId, jobId }) {
+  log.warn('Unable to report provisioning state', {
+    tenantId,
+    provisioningJobId,
+    jobId,
+    currentStep,
+    channel,
+    err: String(error?.message || error),
+  });
+}
+
+async function reportJobState({
+  currentStep,
+  values,
+  job,
+  tenantId,
+  provisioningJobId,
+  includeBullMqProgress = false,
+}) {
+  return reportProvisioningStep({
+    currentStep,
+    updateDurableState: () => updateProvisioningJob(provisioningJobId, values),
+    updateProgress: includeBullMqProgress
+      ? () => job.updateProgress({ currentStep })
+      : async () => {},
+    onDurableError: (error, step) =>
+      warnReportingFailure({
+        error,
+        currentStep: step,
+        channel: 'control_plane',
+        tenantId,
+        provisioningJobId,
+        jobId: job.id,
+      }),
+    onProgressError: (error, step) =>
+      warnReportingFailure({
+        error,
+        currentStep: step,
+        channel: 'bullmq',
+        tenantId,
+        provisioningJobId,
+        jobId: job.id,
+      }),
+  });
+}
+
 const tenantProvisionWorker = new Worker(
   'tenant.provision',
   async (job) => {
@@ -80,12 +126,18 @@ const tenantProvisionWorker = new Worker(
           updated_at = NOW()
       WHERE id = ${tenantId} AND status <> 'active'
     `;
-    await updateProvisioningJob(provisioningJobId, {
-      status: 'running',
+    await reportJobState({
       currentStep: 'starting',
-      started: true,
-      clearFinished: true,
-      incrementAttempt: true,
+      values: {
+        status: 'running',
+        currentStep: 'starting',
+        started: true,
+        clearFinished: true,
+        incrementAttempt: true,
+      },
+      job,
+      tenantId,
+      provisioningJobId,
     });
 
     try {
@@ -93,28 +145,21 @@ const tenantProvisionWorker = new Worker(
         adminEmail,
         adminName,
         onStep: (currentStep) =>
-          reportProvisioningStep({
+          reportJobState({
             currentStep,
-            updateDurableState: (step) =>
-              updateProvisioningJob(provisioningJobId, {
-                status: 'running',
-                currentStep: step,
-              }),
-            updateProgress: (step) => job.updateProgress({ currentStep: step }),
-            onProgressError: (error, step) =>
-              log.warn('Unable to report BullMQ provisioning progress', {
-                tenantId,
-                provisioningJobId,
-                jobId: job.id,
-                currentStep: step,
-                err: String(error?.message || error),
-              }),
+            values: { status: 'running', currentStep },
+            job,
+            tenantId,
+            provisioningJobId,
+            includeBullMqProgress: true,
           }),
       });
-      await updateProvisioningJob(provisioningJobId, {
-        status: 'completed',
+      await reportJobState({
         currentStep: 'active',
-        finished: true,
+        values: { status: 'completed', currentStep: 'active', finished: true },
+        job,
+        tenantId,
+        provisioningJobId,
       });
       log.info('Tenant provisioned', { ...result, provisioningJobId, jobId: job.id });
       return result;
@@ -133,21 +178,44 @@ const tenantProvisionWorker = new Worker(
         terminal: failure.isFinalAttempt,
       });
 
-      await sql`
-        UPDATE tenants
-        SET status = ${failure.tenantStatus},
-            data_location_status = ${failure.dataLocationStatus},
-            updated_at = NOW()
-        WHERE id = ${tenantId}
-      `;
-      await updateProvisioningJob(provisioningJobId, {
-        status: failure.jobStatus,
-        currentStep: failure.currentStep,
-        errorCode: failure.errorCode,
-        errorMessage: failure.errorMessage,
-        finished: failure.finished,
-        clearFinished: failure.clearFinished,
-      });
+      try {
+        await sql`
+          UPDATE tenants
+          SET status = ${failure.tenantStatus},
+              data_location_status = ${failure.dataLocationStatus},
+              updated_at = NOW()
+          WHERE id = ${tenantId}
+        `;
+      } catch (reportingError) {
+        warnReportingFailure({
+          error: reportingError,
+          currentStep: failure.currentStep,
+          channel: 'tenant_failure_state',
+          tenantId,
+          provisioningJobId,
+          jobId: job.id,
+        });
+      }
+
+      try {
+        await updateProvisioningJob(provisioningJobId, {
+          status: failure.jobStatus,
+          currentStep: failure.currentStep,
+          errorCode: failure.errorCode,
+          errorMessage: failure.errorMessage,
+          finished: failure.finished,
+          clearFinished: failure.clearFinished,
+        });
+      } catch (reportingError) {
+        warnReportingFailure({
+          error: reportingError,
+          currentStep: failure.currentStep,
+          channel: 'control_plane_failure_state',
+          tenantId,
+          provisioningJobId,
+          jobId: job.id,
+        });
+      }
       throw error;
     }
   },
