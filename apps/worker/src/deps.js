@@ -3,7 +3,7 @@
  */
 export {
   provisionTenantSchema,
-  rollbackTenantProvisioning,
   runControlPlaneMigrations,
+  createControlPlaneSql,
 } from '@hippo/db';
 export { createLogger, validateEnv, workerEnvSchema } from '@hippo/shared';
