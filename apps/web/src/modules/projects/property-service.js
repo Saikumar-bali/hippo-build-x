@@ -15,9 +15,9 @@ export function filterProjectsByScope(ctx, projects) {
   const scope = resolveScope(ctx);
   if (scope.type === 'global') return projects;
   if (scope.type === 'scoped' && scope.projectIds?.length) {
-    return projects.filter((p) => scope.projectIds.includes(p.id));
+    return projects.filter((project) => scope.projectIds.includes(project.id));
   }
-  return projects.filter((p) => p.created_by === ctx.userId);
+  return projects.filter((project) => project.created_by === ctx.userId);
 }
 
 export function assertProjectAccess(ctx, projectId) {
@@ -42,28 +42,31 @@ export async function syncLocationForTower(sql, { tenantId, projectId, tower, us
     );
     return existing[0].id;
   }
-  const [loc] = await sql.unsafe(
+  const [location] = await sql.unsafe(
     `INSERT INTO locations (tenant_id, project_id, name, code, status, created_by)
      VALUES ($1, $2, $3, $4, 'active', $5) RETURNING id`,
     [tenantId, projectId, tower.name, tower.code, userId || null],
   );
-  return loc.id;
+  return location.id;
 }
 
 /**
  * Bulk generate floors + units for a tower.
  */
-export async function generateUnits(sql, {
-  tenantId,
-  projectId,
-  towerId,
-  categoryId,
-  floorFrom,
-  floorTo,
-  unitsPerFloor,
-  unitPrefix,
-  userId,
-}) {
+export async function generateUnits(
+  sql,
+  {
+    tenantId,
+    projectId,
+    towerId,
+    categoryId,
+    floorFrom,
+    floorTo,
+    unitsPerFloor,
+    unitPrefix,
+    userId,
+  },
+) {
   if (floorFrom > floorTo) throw AppError.validation('floorFrom must be <= floorTo');
   if (unitsPerFloor < 1 || unitsPerFloor > 50) {
     throw AppError.validation('unitsPerFloor must be 1-50');
@@ -77,7 +80,7 @@ export async function generateUnits(sql, {
 
   const created = [];
   for (let floorNum = floorFrom; floorNum <= floorTo; floorNum++) {
-    let floorRows = await sql.unsafe(
+    const floorRows = await sql.unsafe(
       `SELECT id FROM floors WHERE tower_id = $1 AND floor_number = $2 AND deleted_at IS NULL`,
       [towerId, floorNum],
     );
@@ -91,25 +94,33 @@ export async function generateUnits(sql, {
       floorId = floor.id;
     }
 
-    for (let u = 1; u <= unitsPerFloor; u++) {
-      const unitNumber = `${unitPrefix || ''}${floorNum}${String(u).padStart(2, '0')}`;
+    for (let unitIndex = 1; unitIndex <= unitsPerFloor; unitIndex++) {
+      const unitNumber = `${unitPrefix || ''}${floorNum}${String(unitIndex).padStart(2, '0')}`;
       try {
         const [unit] = await sql.unsafe(
           `INSERT INTO units (tenant_id, project_id, tower_id, floor_id, category_id, unit_number, status, created_by)
            VALUES ($1, $2, $3, $4, $5, $6, 'available', $7)
            RETURNING *`,
-          [tenantId, projectId, towerId, floorId, categoryId || null, unitNumber, userId || null],
+          [
+            tenantId,
+            projectId,
+            towerId,
+            floorId,
+            categoryId || null,
+            unitNumber,
+            userId || null,
+          ],
         );
         created.push(unit);
-      } catch (err) {
-        if (String(err.message).includes('unique') || String(err.code) === '23505') {
+      } catch (error) {
+        if (String(error.message).includes('unique') || String(error.code) === '23505') {
           throw new AppError(
             ErrorCode.ALREADY_EXISTS,
             `Duplicate unit coordinate: ${unitNumber}`,
             409,
           );
         }
-        throw err;
+        throw error;
       }
     }
   }
@@ -119,14 +130,10 @@ export async function generateUnits(sql, {
 /**
  * Change unit status with transition rules + history.
  */
-export async function changeUnitStatus(sql, {
-  tenantId,
-  unitId,
-  toStatus,
-  reason,
-  actorId,
-  correlationId,
-}) {
+export async function changeUnitStatus(
+  sql,
+  { tenantId, unitId, toStatus, reason, actorId, correlationId },
+) {
   if (!UNIT_STATUSES.has(toStatus)) {
     throw AppError.validation(`Invalid status: ${toStatus}`);
   }
@@ -140,12 +147,8 @@ export async function changeUnitStatus(sql, {
   const from = unit.status;
   if (from === toStatus) return unit;
 
-  // Cannot silently overwrite reserved/sold
-  if ((from === 'reserved' || from === 'sold') && toStatus === 'available') {
-    // allow release with explicit reason
-    if (!reason) {
-      throw AppError.validation(`Cannot change ${from} to available without a reason`);
-    }
+  if ((from === 'reserved' || from === 'sold') && toStatus === 'available' && !reason) {
+    throw AppError.validation(`Cannot change ${from} to available without a reason`);
   }
   if (from === 'sold' && toStatus === 'reserved') {
     throw AppError.validation('Sold units cannot move to reserved');
@@ -174,44 +177,38 @@ export async function assertNoDependencyCycle(sql, { projectId, predecessorId, s
   if (predecessorId === successorId) {
     throw AppError.validation('Task cannot depend on itself');
   }
-  // BFS from successor following successors — if we reach predecessor, cycle
   const edges = await sql.unsafe(
     `SELECT predecessor_id, successor_id FROM task_dependencies WHERE project_id = $1`,
     [projectId],
   );
-  const adj = new Map();
-  for (const e of edges) {
-    if (!adj.has(e.predecessor_id)) adj.set(e.predecessor_id, []);
-    adj.get(e.predecessor_id).push(e.successor_id);
+  const adjacency = new Map();
+  for (const edge of edges) {
+    if (!adjacency.has(edge.predecessor_id)) adjacency.set(edge.predecessor_id, []);
+    adjacency.get(edge.predecessor_id).push(edge.successor_id);
   }
-  if (!adj.has(predecessorId)) adj.set(predecessorId, []);
-  adj.get(predecessorId).push(successorId);
+  if (!adjacency.has(predecessorId)) adjacency.set(predecessorId, []);
+  adjacency.get(predecessorId).push(successorId);
 
   const seen = new Set();
   const queue = [successorId];
   while (queue.length) {
-    const cur = queue.shift();
-    if (cur === predecessorId) {
+    const current = queue.shift();
+    if (current === predecessorId) {
       throw AppError.validation('Task dependency would create a cycle');
     }
-    if (seen.has(cur)) continue;
-    seen.add(cur);
-    for (const next of adj.get(cur) || []) queue.push(next);
+    if (seen.has(current)) continue;
+    seen.add(current);
+    for (const next of adjacency.get(current) || []) queue.push(next);
   }
 }
 
 /**
  * Create a new immutable drawing version.
  */
-export async function createDrawingVersion(sql, {
-  tenantId,
-  projectId,
-  drawingNumber,
-  title,
-  fileUrl,
-  notes,
-  userId,
-}) {
+export async function createDrawingVersion(
+  sql,
+  { tenantId, projectId, drawingNumber, title, fileUrl, notes, userId },
+) {
   const latest = await sql.unsafe(
     `SELECT id, version FROM drawings
      WHERE project_id = $1 AND drawing_number = $2 AND deleted_at IS NULL
