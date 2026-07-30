@@ -52,6 +52,20 @@ async function updateJob(jobId, values) {
   );
 }
 
+async function updateJobBestEffort(jobId, values, context) {
+  try {
+    await updateJob(jobId, values);
+    return true;
+  } catch (error) {
+    log.warn('Unable to reconcile durable provisioning job state', {
+      provisioningJobId: jobId,
+      ...context,
+      err: String(error?.message || error),
+    });
+    return false;
+  }
+}
+
 async function markTenantProvisioningFailed(tenantId) {
   if (!tenantId) return;
   const sql = createControlPlaneSql();
@@ -66,34 +80,54 @@ async function markTenantProvisioningFailed(tenantId) {
 }
 
 async function provisionSynchronously(payload) {
-  await updateJob(payload.provisioningJobId, {
-    status: 'running',
-    currentStep: 'starting',
-    started: true,
-    incrementAttempt: true,
-  });
+  await updateJobBestEffort(
+    payload.provisioningJobId,
+    {
+      status: 'running',
+      currentStep: 'starting',
+      started: true,
+      incrementAttempt: true,
+    },
+    { currentStep: 'starting', mode: 'sync' },
+  );
+
   try {
     const result = await provisionTenantSchema(payload.tenantId, payload.schemaName, {
       adminEmail: payload.adminEmail,
       adminName: payload.adminName,
       onStep: (currentStep) =>
-        updateJob(payload.provisioningJobId, { status: 'running', currentStep }),
+        updateJobBestEffort(
+          payload.provisioningJobId,
+          { status: 'running', currentStep },
+          { currentStep, mode: 'sync' },
+        ),
     });
-    await updateJob(payload.provisioningJobId, {
-      status: 'completed',
-      currentStep: 'active',
-      finished: true,
-    });
+    await updateJobBestEffort(
+      payload.provisioningJobId,
+      { status: 'completed', currentStep: 'active', finished: true },
+      { currentStep: 'active', mode: 'sync' },
+    );
     return { mode: 'sync', result };
   } catch (error) {
-    await markTenantProvisioningFailed(payload.tenantId);
-    await updateJob(payload.provisioningJobId, {
-      status: 'failed',
-      currentStep: 'failed',
-      errorCode: 'PROVISIONING_FAILED',
-      errorMessage: String(error.message).slice(0, 2000),
-      finished: true,
-    });
+    try {
+      await markTenantProvisioningFailed(payload.tenantId);
+    } catch (reportingError) {
+      log.warn('Unable to record synchronous tenant failure state', {
+        tenantId: payload.tenantId,
+        err: String(reportingError?.message || reportingError),
+      });
+    }
+    await updateJobBestEffort(
+      payload.provisioningJobId,
+      {
+        status: 'failed',
+        currentStep: 'failed',
+        errorCode: 'PROVISIONING_FAILED',
+        errorMessage: String(error.message).slice(0, 2000),
+        finished: true,
+      },
+      { currentStep: 'failed', mode: 'sync' },
+    );
     throw error;
   }
 }
@@ -139,6 +173,39 @@ async function recordTerminalQueueFailure(payload, error, errorCode = 'QUEUE_UNA
   });
 }
 
+async function handleQueueAddFailure(payload, error) {
+  const failureKind = classifyQueueFailure(error);
+
+  if (failureKind === 'unsupported_version') {
+    if (canProvisionSynchronously()) {
+      _queueUnavailable = String(error.message || error);
+      log.warn('Redis version unsupported; provisioning synchronously', {
+        err: String(error.message || error),
+      });
+      return provisionSynchronously(payload);
+    }
+    await recordTerminalQueueFailure(payload, error, 'QUEUE_REDIS_UNSUPPORTED');
+    throw error;
+  }
+
+  if (failureKind === 'transient') {
+    resetTransientQueueState();
+    log.warn('Transient BullMQ failure; queue state will be retried', {
+      err: String(error.message || error),
+    });
+
+    if (canProvisionSynchronously()) {
+      return provisionSynchronously(payload);
+    }
+
+    await recordRetryableQueueFailure(payload, error);
+    throw error;
+  }
+
+  await recordTerminalQueueFailure(payload, error);
+  throw error;
+}
+
 /**
  * Enqueue an existing durable provisioning job. The BullMQ id is deterministic,
  * so retries cannot create duplicate queue work.
@@ -162,44 +229,17 @@ export async function enqueueTenantProvision(payload) {
       attempts: 3,
       backoff: { type: 'exponential', delay: 2000 },
     });
-    await updateJob(payload.provisioningJobId, {
-      status: 'queued',
-      currentStep: 'queued',
-      bullmqJobId,
-    });
-    return { mode: 'queue', bullmqJobId };
   } catch (error) {
-    const failureKind = classifyQueueFailure(error);
-
-    if (failureKind === 'unsupported_version') {
-      if (canProvisionSynchronously()) {
-        _queueUnavailable = String(error.message || error);
-        log.warn('Redis version unsupported; provisioning synchronously', {
-          err: String(error.message || error),
-        });
-        return provisionSynchronously(payload);
-      }
-      await recordTerminalQueueFailure(payload, error, 'QUEUE_REDIS_UNSUPPORTED');
-      throw error;
-    }
-
-    if (failureKind === 'transient') {
-      resetTransientQueueState();
-      log.warn('Transient BullMQ failure; queue state will be retried', {
-        err: String(error.message || error),
-      });
-
-      if (canProvisionSynchronously()) {
-        return provisionSynchronously(payload);
-      }
-
-      await recordRetryableQueueFailure(payload, error);
-      throw error;
-    }
-
-    await recordTerminalQueueFailure(payload, error);
-    throw error;
+    return handleQueueAddFailure(payload, error);
   }
+
+  await updateJobBestEffort(
+    payload.provisioningJobId,
+    { status: 'queued', currentStep: 'queued', bullmqJobId },
+    { currentStep: 'queued', mode: 'queue', bullmqJobId },
+  );
+
+  return { mode: 'queue', bullmqJobId };
 }
 
 export function __resetTenantProvisionQueueForTests() {
