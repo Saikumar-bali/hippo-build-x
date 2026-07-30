@@ -14,7 +14,13 @@ test.describe('Locked tenant lifecycle', () => {
     await expect(page.getByRole('heading', { name: 'Platform Super Admin' })).toBeVisible();
     await page.getByLabel('Email').fill(PLATFORM_EMAIL);
     await page.getByLabel('Password').fill(PLATFORM_PASSWORD);
+    const platformLogin = page.waitForResponse(
+      (response) =>
+        response.url().includes('/api/v1/platform/auth/login') &&
+        response.request().method() === 'POST',
+    );
     await page.getByRole('button', { name: 'Sign in' }).click();
+    expect((await platformLogin).status()).toBe(200);
 
     await page.waitForURL('**/platform/tenants');
     await expect(page.getByText('Platform Control Plane')).toBeVisible();
@@ -36,8 +42,6 @@ test.describe('Locked tenant lifecycle', () => {
     await expect(drawer.getByText(/^tenant_[0-9a-f]{32}$/)).toBeVisible();
     await expect(drawer.getByText('Channel credential vault')).toBeVisible();
 
-    // Auto-refresh exposes the durable state machine. CI uses sync fallback when
-    // no worker is running, while full environments progress through BullMQ.
     await expect(page.locator('.ant-table-tbody')).toContainText('ACTIVE', { timeout: 30000 });
     await page.locator('.ant-drawer-close').click();
 
@@ -48,7 +52,12 @@ test.describe('Locked tenant lifecycle', () => {
     await page.getByLabel('Tenant slug').fill(tenantSlug);
     await page.getByLabel('Email').fill(adminEmail);
     await page.getByLabel('Password').fill(TENANT_DEFAULT_PASSWORD);
+    const tenantLogin = page.waitForResponse(
+      (response) =>
+        response.url().includes('/api/v1/auth/login') && response.request().method() === 'POST',
+    );
     await page.getByRole('button', { name: 'Login' }).click();
+    expect((await tenantLogin).status()).toBe(200);
 
     await page.waitForURL('**/dashboard', { timeout: 15000 });
     await expect(page.locator('.ant-layout-sider')).toBeVisible();
