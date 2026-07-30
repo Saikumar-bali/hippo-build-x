@@ -1,6 +1,6 @@
 -- PRD §5 locked multi-tenancy control plane.
 -- Existing installations are moved in-place; public compatibility views are
--- retained for one release so rolling application instances can drain safely.
+-- retained for one rolling-release window so old readers can drain safely.
 
 CREATE SCHEMA IF NOT EXISTS control_plane;
 
@@ -72,9 +72,9 @@ CREATE TABLE IF NOT EXISTS control_plane.tenant_channels (
   UNIQUE (tenant_id, channel_type)
 );
 
--- Phase 12 owns the management APIs and lifecycle behavior for these tables.
--- Creating their stable control-plane shape now prevents another isolation
--- redesign when dedicated databases and entitlements arrive.
+-- Phase 12 owns these management APIs and lifecycle operations. Their stable
+-- schema is reserved now so dedicated databases and entitlements do not require
+-- another control-plane redesign.
 CREATE TABLE IF NOT EXISTS control_plane.plans (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   code VARCHAR(100) NOT NULL UNIQUE,
@@ -113,7 +113,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_flags_global_key
   ON control_plane.feature_flags (flag_key)
   WHERE tenant_id IS NULL;
 
--- Read compatibility only. All new code explicitly targets control_plane.
+-- The new runner has already imported legacy rows into
+-- control_plane.control_plane_migrations before this migration executes.
+DROP TABLE IF EXISTS public.control_plane_migrations;
+
+-- Read compatibility only. These are views, not application tables. Remove in
+-- the next migration after every deployed instance uses explicit control-plane
+-- queries.
 DROP VIEW IF EXISTS public.tenants;
 CREATE VIEW public.tenants AS SELECT * FROM control_plane.tenants;
 
