@@ -40,7 +40,6 @@ export function errorResponse(errorOrMessage, status = 500, code = ErrorCode.INT
     );
     return Response.json(body, { status: errorOrMessage.statusCode });
   }
-
   const message =
     typeof errorOrMessage === 'string'
       ? errorOrMessage
@@ -66,8 +65,7 @@ export function tenantSql() {
 }
 
 async function resolveTenantRecord(tenantId) {
-  const cp = createControlPlaneSql();
-  const rows = await cp`
+  const rows = await createControlPlaneSql()`
     SELECT id, schema_name, slug, status, isolation_mode, database_secret_ref
     FROM tenants
     WHERE id = ${tenantId} AND deleted_at IS NULL
@@ -76,14 +74,9 @@ async function resolveTenantRecord(tenantId) {
   return rows[0] || null;
 }
 
-/**
- * Authenticate a tenant request. Tokens carry identity only; schema/database
- * locators are always reloaded from control_plane.tenants.
- */
 export async function resolveAuthFromRequest(request) {
   const token = extractAccessToken(request);
   if (!token) throw AppError.unauthorized('Authentication required');
-
   const payload = await verifyAccessToken(token);
   if (!payload?.sub || !payload?.tenantId || payload.scope === 'platform') {
     throw AppError.unauthorized('Invalid access token');
@@ -100,7 +93,6 @@ export async function resolveAuthFromRequest(request) {
 
   const authz = await loadUserAuthz(tenant.schema_name, payload.sub, tenant.id);
   if (!authz) throw AppError.unauthorized('User not found');
-
   return {
     tenantId: tenant.id,
     schemaName: tenant.schema_name,
@@ -117,10 +109,6 @@ export async function resolveAuthFromRequest(request) {
   };
 }
 
-/**
- * Header-based tenant resolution remains only for unauthenticated internal/E2E
- * routes. An authenticated JWT always wins and the header cannot override it.
- */
 export async function resolveTenantFromRequest(request) {
   const token = extractAccessToken(request);
   if (token) return resolveAuthFromRequest(request);
@@ -129,7 +117,6 @@ export async function resolveTenantFromRequest(request) {
   if (!tenantId) {
     throw new AppError(ErrorCode.TENANT_CONTEXT_REQUIRED, 'Authentication required', 401);
   }
-
   const tenant = await resolveTenantRecord(tenantId);
   if (!tenant) throw new AppError(ErrorCode.TENANT_NOT_FOUND, 'Tenant not found', 404);
   if (tenant.status !== 'active') {
@@ -138,7 +125,6 @@ export async function resolveTenantFromRequest(request) {
 
   const userId = request.headers.get('x-user-id') || undefined;
   const authz = userId ? await loadUserAuthz(tenant.schema_name, userId, tenant.id) : null;
-
   return {
     tenantId: tenant.id,
     schemaName: tenant.schema_name,
@@ -176,7 +162,6 @@ export async function resolvePlatformAuth(request) {
   if (!payload?.sub || payload.scope !== 'platform') {
     throw AppError.unauthorized('Platform authentication required');
   }
-
   const user = await loadPlatformUser(payload.sub);
   if (!user) throw AppError.unauthorized('Platform user not found');
   return {
@@ -220,11 +205,11 @@ export function withApiHandler(options, handler) {
       if (platform) {
         if (platformAuth) {
           const platformCtx = await resolvePlatformAuth(request);
-          return runWithContext({ ...baseCtx, ...platformCtx }, () =>
+          return await runWithContext({ ...baseCtx, ...platformCtx }, () =>
             handler(request, routeContext),
           );
         }
-        return runWithContext(baseCtx, () => handler(request, routeContext));
+        return await runWithContext(baseCtx, () => handler(request, routeContext));
       }
 
       const tenantCtx = auth
@@ -232,7 +217,7 @@ export function withApiHandler(options, handler) {
         : await resolveTenantFromRequest(request);
       const fullCtx = { ...baseCtx, ...tenantCtx };
 
-      return runWithContext(fullCtx, async () => {
+      return await runWithContext(fullCtx, async () => {
         if (permission) enforcePermission(fullCtx, permission);
         if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method)) {
           enforceNotAuditorWrite(fullCtx, request.method);
