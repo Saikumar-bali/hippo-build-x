@@ -39,6 +39,13 @@ const SELECT_TENANTS = `
   ) job ON true
 `;
 
+function idempotentTenantQuery() {
+  return `${SELECT_TENANTS}
+    JOIN provisioning_jobs same_job ON same_job.tenant_id = t.id
+    WHERE same_job.idempotency_key = $1 AND t.deleted_at IS NULL
+    LIMIT 1`;
+}
+
 export const GET = withApiHandler(
   { platform: true, auth: false, platformAuth: true },
   async () => {
@@ -79,19 +86,18 @@ export const POST = withApiHandler(
     const idempotencyKey =
       request.headers.get('idempotency-key') || `tenant-create:${slug.toLowerCase()}`;
 
-    const previous = await sql.unsafe(
-      `${SELECT_TENANTS}
-       JOIN provisioning_jobs same_job ON same_job.tenant_id = t.id
-       WHERE same_job.idempotency_key = $1 AND t.deleted_at IS NULL
-       LIMIT 1`,
-      [idempotencyKey],
-    );
+    const previous = await sql.unsafe(idempotentTenantQuery(), [idempotencyKey]);
     if (previous[0]) return successResponse(previous[0], { idempotentReplay: true }, 200);
 
     const tenantId = crypto.randomUUID();
     const schemaName = toTenantSchemaName(tenantId);
 
     const created = await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${idempotencyKey}, 0))`;
+
+      const replay = await tx.unsafe(idempotentTenantQuery(), [idempotencyKey]);
+      if (replay[0]) return { replay: replay[0] };
+
       const existing = await tx`
         SELECT id FROM tenants WHERE slug = ${slug} AND deleted_at IS NULL LIMIT 1
       `;
@@ -118,6 +124,10 @@ export const POST = withApiHandler(
       `;
       return { tenant, job };
     });
+
+    if (created.replay) {
+      return successResponse(created.replay, { idempotentReplay: true }, 200);
+    }
 
     const queued = await enqueueTenantProvision({
       tenantId,
