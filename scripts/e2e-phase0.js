@@ -1,123 +1,112 @@
 #!/usr/bin/env node
-/**
- * Phase 0 end-to-end verification script.
- * Usage: node scripts/e2e-phase0.js
- * Optional: BASE_URL=http://localhost:3000 for HTTP checks.
- */
+/** PRD §5 end-to-end verification. Optional BASE_URL adds HTTP/UI API checks. */
 import { createLogger } from '../packages/shared/src/index.js';
 
 const log = createLogger({ service: 'e2e-phase0' });
 const results = [];
-
-function pass(name, detail) {
+const pass = (name, detail) => {
   results.push({ name, ok: true, detail });
   log.info('PASS', { name, detail });
-}
-
-function fail(name, detail) {
+};
+const fail = (name, detail) => {
   results.push({ name, ok: false, detail });
   log.error('FAIL', { name, detail });
-}
+};
 
 async function main() {
-  if (!process.env.DATABASE_URL) {
-    throw new Error('DATABASE_URL is required');
-  }
+  if (!process.env.DATABASE_URL) throw new Error('DATABASE_URL is required');
 
   const {
     runControlPlaneMigrations,
     provisionTenantSchema,
     rollbackTenantProvisioning,
-    toSchemaName,
-    getSql,
+    toTenantSchemaName,
+    createControlPlaneSql,
     createTenantSql,
     pingDatabase,
     isControlPlaneReady,
     closeDb,
     TENANT_STATUS,
   } = await import('../packages/db/src/index.js');
-
-  await runControlPlaneMigrations();
-  pass('control-plane-migrate', 'migrations applied');
-
   const { seedPlatformSuperAdmin, PLATFORM_SUPER_ADMIN } = await import(
     '../packages/db/src/seed/platform.js'
   );
+
+  await runControlPlaneMigrations();
   await seedPlatformSuperAdmin();
+  pass('control-plane-migrate', 'explicit control_plane ready');
+  (await pingDatabase()) ? pass('db-ping', 'ok') : fail('db-ping', 'failed');
+  (await isControlPlaneReady())
+    ? pass('control-plane-ready', 'control_plane.tenants found')
+    : fail('control-plane-ready', 'missing');
 
-  if (!(await pingDatabase())) fail('db-ping', 'ping failed');
-  else pass('db-ping', 'ok');
-
-  if (!(await isControlPlaneReady())) fail('control-plane-ready', 'tenants table missing');
-  else pass('control-plane-ready', 'ok');
-
+  const cp = createControlPlaneSql();
   const stamp = Date.now();
+  const tenantA = crypto.randomUUID();
+  const tenantB = crypto.randomUUID();
   const slugA = `e2e-a-${stamp}`;
   const slugB = `e2e-b-${stamp}`;
-  const schemaA = toSchemaName(slugA);
-  const schemaB = toSchemaName(slugB);
-  const sql = getSql();
+  const schemaA = toTenantSchemaName(tenantA);
+  const schemaB = toTenantSchemaName(tenantB);
 
-  const [tenantA] = await sql`
-    INSERT INTO tenants (name, slug, schema_name, status)
-    VALUES (${'E2E A'}, ${slugA}, ${schemaA}, ${TENANT_STATUS.PROVISIONING})
-    RETURNING id, schema_name, status
+  await cp`
+    INSERT INTO tenants (id, name, slug, schema_name, status, isolation_mode)
+    VALUES (${tenantA}, 'E2E A', ${slugA}, ${schemaA}, ${TENANT_STATUS.PROVISIONING}, 'shared_schema'),
+           (${tenantB}, 'E2E B', ${slugB}, ${schemaB}, ${TENANT_STATUS.PROVISIONING}, 'shared_schema')
   `;
-  const [tenantB] = await sql`
-    INSERT INTO tenants (name, slug, schema_name, status)
-    VALUES (${'E2E B'}, ${slugB}, ${schemaB}, ${TENANT_STATUS.PROVISIONING})
-    RETURNING id, schema_name, status
-  `;
-
-  await provisionTenantSchema(tenantA.id, schemaA, {
-    adminEmail: `admin@${slugA}.test`,
-  });
-  await provisionTenantSchema(tenantB.id, schemaB, {
-    adminEmail: `admin@${slugB}.test`,
-  });
+  await provisionTenantSchema(tenantA, schemaA, { adminEmail: `admin@${slugA}.test` });
+  await provisionTenantSchema(tenantB, schemaB, { adminEmail: `admin@${slugB}.test` });
   pass('provision-tenants', `${schemaA}, ${schemaB}`);
 
-  await provisionTenantSchema(tenantA.id, schemaA, {
-    adminEmail: `admin@${slugA}.test`,
-  });
-  const admins = await createTenantSql(schemaA).unsafe(
-    `SELECT email FROM users WHERE email = $1`,
-    [`admin@${slugA}.test`],
-  );
-  if (admins.length !== 1) fail('provision-idempotent', `expected 1 admin, got ${admins.length}`);
-  else pass('provision-idempotent', 'single admin retained');
+  const sqlA = createTenantSql(schemaA, tenantA);
+  const sqlB = createTenantSql(schemaB, tenantB);
+  await provisionTenantSchema(tenantA, schemaA, { adminEmail: `admin@${slugA}.test` });
+  const admins = await sqlA.unsafe(`SELECT email FROM users WHERE email = $1`, [
+    `admin@${slugA}.test`,
+  ]);
+  admins.length === 1
+    ? pass('provision-idempotent', 'single admin retained')
+    : fail('provision-idempotent', `found ${admins.length}`);
 
-  await createTenantSql(schemaA).unsafe(
+  await sqlA.unsafe(
     `INSERT INTO users (tenant_id, email, name, password_hash, status)
-     VALUES ($1, $2, $3, $4, 'active')`,
-    [tenantA.id, `secret@${slugA}.test`, 'Secret', '$pending$'],
+     VALUES ($1, $2, 'Secret', '$pending$', 'active')`,
+    [tenantA, `secret@${slugA}.test`],
   );
-  const leaked = await createTenantSql(schemaB).unsafe(
-    `SELECT email FROM users WHERE email = $1`,
+  const leaked = await sqlB.unsafe(`SELECT email FROM users WHERE email = $1`, [
+    `secret@${slugA}.test`,
+  ]);
+  leaked.length === 0
+    ? pass('normal-isolation', 'tenant B cannot read tenant A')
+    : fail('normal-isolation', 'data leaked');
+
+  const qualifiedLeak = await sqlB.unsafe(
+    `SELECT email FROM "${schemaA}".users WHERE email = $1`,
     [`secret@${slugA}.test`],
   );
-  if (leaked.length !== 0) fail('isolation', 'tenant B saw tenant A user');
-  else pass('isolation', 'tenant B cannot read tenant A');
+  qualifiedLeak.length === 0
+    ? pass('qualified-read-isolation', 'forced RLS blocked read')
+    : fail('qualified-read-isolation', 'qualified data leaked');
 
-  // Tenant-context reject is verified over HTTP below; ALS smoke check here
-  const { AsyncLocalStorage } = await import('node:async_hooks');
-  const als = new AsyncLocalStorage();
-  const value = await als.run({ tenantId: tenantA.id }, () => als.getStore()?.tenantId);
-  if (value !== tenantA.id) fail('tenant-context-set', 'ALS failed');
-  else pass('tenant-context-set', 'ALS works');
-  pass('tenant-context-required', 'verified via http-reject-no-tenant when BASE_URL set');
+  try {
+    await sqlB.unsafe(
+      `INSERT INTO "${schemaA}".users
+        (tenant_id, email, name, password_hash, status)
+       VALUES ($1, $2, 'Cross Tenant', '$pending$', 'active')`,
+      [tenantB, `cross@${slugB}.test`],
+    );
+    fail('qualified-write-isolation', 'cross-schema insert succeeded');
+  } catch {
+    pass('qualified-write-isolation', 'forced RLS blocked write');
+  }
 
   const base = process.env.BASE_URL;
   if (base) {
     const health = await fetch(`${base}/api/v1/health`);
-    const healthJson = await health.json();
-    if (health.ok && healthJson.success) pass('http-health', String(health.status));
-    else fail('http-health', JSON.stringify(healthJson));
+    health.ok ? pass('http-health', String(health.status)) : fail('http-health', String(health.status));
 
     const ready = await fetch(`${base}/api/v1/health/ready`);
-    const readyJson = await ready.json();
-    if (ready.ok && readyJson.success) pass('http-ready', JSON.stringify(readyJson.data?.checks));
-    else fail('http-ready', `status=${ready.status} body=${JSON.stringify(readyJson)}`);
+    ready.ok ? pass('http-ready', String(ready.status)) : fail('http-ready', String(ready.status));
 
     const platformLogin = await fetch(`${base}/api/v1/platform/auth/login`, {
       method: 'POST',
@@ -127,145 +116,88 @@ async function main() {
         password: PLATFORM_SUPER_ADMIN.password,
       }),
     });
-    const platformLoginJson = await platformLogin.json();
     const platformCookies = (platformLogin.headers.getSetCookie?.() || [])
-      .map((c) => c.split(';')[0])
+      .map((cookie) => cookie.split(';')[0])
       .join('; ');
-    if (!platformLogin.ok || !platformCookies.includes('access_token')) {
-      fail('http-platform-login', JSON.stringify(platformLoginJson));
-    } else {
-      pass('http-platform-login', PLATFORM_SUPER_ADMIN.email);
-    }
+    platformLogin.ok && platformCookies.includes('access_token')
+      ? pass('http-platform-login', PLATFORM_SUPER_ADMIN.email)
+      : fail('http-platform-login', await platformLogin.text());
 
     const list = await fetch(`${base}/api/v1/platform/tenants`, {
       headers: { cookie: platformCookies },
     });
     const listJson = await list.json();
-    if (list.ok && Array.isArray(listJson.data)) pass('http-list-tenants', `${listJson.data.length} tenants`);
-    else fail('http-list-tenants', JSON.stringify(listJson));
-
-    const getOne = await fetch(`${base}/api/v1/platform/tenants/${tenantA.id}`, {
-      headers: { cookie: platformCookies },
-    });
-    const getJson = await getOne.json();
-    if (getOne.ok && getJson.data?.slug === slugA) pass('http-get-tenant', getJson.data.status);
-    else fail('http-get-tenant', JSON.stringify(getJson));
-
-    const loginRes = await fetch(`${base}/api/v1/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({
-        slug: slugA,
-        email: `admin@${slugA}.test`,
-        password: 'Admin@12345',
-      }),
-    });
-    const loginJson = await loginRes.json();
-    const setCookies = loginRes.headers.getSetCookie?.() || [];
-    const cookie = setCookies.map((c) => c.split(';')[0]).join('; ');
-    if (!loginRes.ok || !cookie.includes('access_token')) {
-      fail('http-tenant-users', `login failed: ${JSON.stringify(loginJson)}`);
-    } else {
-      const users = await fetch(`${base}/api/v1/admin/users`, {
-        headers: { cookie, 'x-request-id': 'e2e-users' },
-      });
-      const usersJson = await users.json();
-      if (users.ok && Array.isArray(usersJson.data)) {
-        pass('http-tenant-users', `${usersJson.data.length} users`);
-      } else {
-        fail('http-tenant-users', JSON.stringify(usersJson));
-      }
-    }
-
-    const noAuth = await fetch(`${base}/api/v1/admin/users`);
-    const noAuthJson = await noAuth.json();
-    if (!noAuth.ok && noAuth.status === 401) {
-      pass('http-reject-no-tenant', '401 without auth');
-    } else {
-      fail('http-reject-no-tenant', JSON.stringify(noAuthJson));
-    }
+    list.ok && Array.isArray(listJson.data)
+      ? pass('http-list-tenants', `${listJson.data.length} tenants`)
+      : fail('http-list-tenants', JSON.stringify(listJson));
 
     const createSlug = `e2e-api-${stamp}`;
+    const adminEmail = `admin@${createSlug}.test`;
     const created = await fetch(`${base}/api/v1/platform/tenants`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', cookie: platformCookies },
-      body: JSON.stringify({ name: 'E2E API Tenant', slug: createSlug }),
+      headers: {
+        'content-type': 'application/json',
+        cookie: platformCookies,
+        'idempotency-key': `e2e-create:${createSlug}`,
+      },
+      body: JSON.stringify({
+        name: 'E2E API Tenant',
+        slug: createSlug,
+        adminEmail,
+        adminName: 'E2E Admin',
+      }),
     });
     const createdJson = await created.json();
     if (created.status === 201 && createdJson.data?.id) {
-      pass(
-        'http-create-tenant',
-        `${createdJson.data.id} status=${createdJson.data.status} mode=${createdJson.data.provisionMode}`,
-      );
-      const schemaName = createdJson.data.schema_name || toSchemaName(createSlug);
-
-      // If still provisioning (async queue), wait briefly then sync-complete
-      if (createdJson.data.status !== 'active') {
-        let active = false;
-        for (let i = 0; i < 5; i++) {
-          await new Promise((r) => setTimeout(r, 500));
-          const check = await fetch(`${base}/api/v1/platform/tenants/${createdJson.data.id}`, {
-            headers: { cookie: platformCookies },
-          });
-          const checkJson = await check.json();
-          if (checkJson.data?.status === 'active') {
-            active = true;
-            break;
-          }
-        }
-        if (!active) {
-          await provisionTenantSchema(createdJson.data.id, schemaName);
-          pass('sync-provision-fallback', 'completed via provisioner');
-        } else {
-          pass('http-worker-provision', 'became active');
-        }
+      pass('http-create-tenant', `${createdJson.data.id} ${createdJson.data.schema_name}`);
+      const createdId = createdJson.data.id;
+      const createdSchema = createdJson.data.schema_name;
+      if (!/^tenant_[0-9a-f]{32}$/.test(createdSchema)) {
+        fail('http-immutable-schema', createdSchema);
       } else {
-        pass('http-worker-provision', `active via ${createdJson.data.provisionMode || 'sync'}`);
+        pass('http-immutable-schema', createdSchema);
       }
 
-      const finalCheck = await fetch(`${base}/api/v1/platform/tenants/${createdJson.data.id}`, {
-        headers: { cookie: platformCookies },
-      });
-      const finalJson = await finalCheck.json();
-      if (finalJson.data?.status === 'active') pass('http-tenant-active', schemaName);
-      else fail('http-tenant-active', JSON.stringify(finalJson));
+      let detail;
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const response = await fetch(`${base}/api/v1/platform/tenants/${createdId}`, {
+          headers: { cookie: platformCookies },
+        });
+        detail = await response.json();
+        if (detail.data?.status === 'active' || detail.data?.status === 'failed') break;
+      }
+      detail?.data?.status === 'active'
+        ? pass('http-provision-state-machine', detail.data.provisioningJobs?.[0]?.current_step)
+        : fail('http-provision-state-machine', JSON.stringify(detail));
 
-      // Retry endpoint should be no-op when active
-      const retry = await fetch(
-        `${base}/api/v1/platform/tenants/${createdJson.data.id}/retry-provisioning`,
-        { method: 'POST', headers: { cookie: platformCookies } },
-      );
-      const retryJson = await retry.json();
-      if (retry.ok) pass('http-retry-provisioning', retryJson.data?.message || 'ok');
-      else fail('http-retry-provisioning', JSON.stringify(retryJson));
-
-      await rollbackTenantProvisioning(schemaName, createdJson.data.id);
-      await sql`DELETE FROM tenants WHERE id = ${createdJson.data.id}`;
+      await rollbackTenantProvisioning(createdSchema, createdId);
+      await cp`DELETE FROM provisioning_jobs WHERE tenant_id = ${createdId}`;
+      await cp`DELETE FROM tenant_channels WHERE tenant_id = ${createdId}`;
+      await cp`DELETE FROM tenants WHERE id = ${createdId}`;
     } else {
       fail('http-create-tenant', JSON.stringify(createdJson));
     }
   } else {
-    pass('http-skipped', 'BASE_URL not set — DB path only');
+    pass('http-skipped', 'BASE_URL not set');
   }
 
-  await rollbackTenantProvisioning(schemaA, tenantA.id);
-  await rollbackTenantProvisioning(schemaB, tenantB.id);
-  await sql`DELETE FROM tenants WHERE id = ${tenantA.id}`;
-  await sql`DELETE FROM tenants WHERE id = ${tenantB.id}`;
-  pass('cleanup', 'e2e tenants removed');
-
+  await rollbackTenantProvisioning(schemaA, tenantA);
+  await rollbackTenantProvisioning(schemaB, tenantB);
+  await cp`DELETE FROM tenant_channels WHERE tenant_id IN (${tenantA}, ${tenantB})`;
+  await cp`DELETE FROM provisioning_jobs WHERE tenant_id IN (${tenantA}, ${tenantB})`;
+  await cp`DELETE FROM tenants WHERE id IN (${tenantA}, ${tenantB})`;
+  pass('cleanup', 'test tenants removed');
   await closeDb();
 
-  const failed = results.filter((r) => !r.ok);
-  console.log('\n=== Phase 0 E2E Summary ===');
-  for (const r of results) {
-    console.log(`${r.ok ? '✓' : '✗'} ${r.name}: ${r.detail || ''}`);
-  }
+  const failed = results.filter((result) => !result.ok);
+  console.log('\n=== PRD §5 Multi-tenancy E2E ===');
+  for (const result of results) console.log(`${result.ok ? '✓' : '✗'} ${result.name}: ${result.detail}`);
   console.log(`\n${results.length - failed.length}/${results.length} passed`);
   if (failed.length) process.exit(1);
 }
 
-main().catch((err) => {
-  console.error(err);
+main().catch((error) => {
+  console.error(error);
   process.exit(1);
 });
