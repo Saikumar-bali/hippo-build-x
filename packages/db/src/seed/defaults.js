@@ -188,16 +188,35 @@ async function seedPhase2Demo(tx, tenantId, projectId) {
       );
     }
 
+    let towerA = null;
     for (const code of ['TOWER-A', 'TOWER-B']) {
+      let tower = (
+        await tx.unsafe(
+          `SELECT id FROM towers WHERE project_id = $1 AND code = $2 AND deleted_at IS NULL LIMIT 1`,
+          [projectId, code],
+        )
+      )[0];
+      if (!tower) {
+        [tower] = await tx.unsafe(
+          `INSERT INTO towers (tenant_id, project_id, block_id, name, code, floors_planned)
+           VALUES ($1, $2, $3, $4, $5, 10) RETURNING id`,
+          [tenantId, projectId, block.id, code === 'TOWER-A' ? 'Tower A' : 'Tower B', code],
+        );
+      }
+      if (code === 'TOWER-A') towerA = tower;
+    }
+
+    for (const floorNumber of [1, 2]) {
       const found = await tx.unsafe(
-        `SELECT id FROM towers WHERE project_id = $1 AND code = $2 AND deleted_at IS NULL LIMIT 1`,
-        [projectId, code],
+        `SELECT id FROM floors
+         WHERE tower_id = $1 AND floor_number = $2 AND deleted_at IS NULL LIMIT 1`,
+        [towerA.id, floorNumber],
       );
       if (!found[0]) {
         await tx.unsafe(
-          `INSERT INTO towers (tenant_id, project_id, block_id, name, code, floors_planned)
-           VALUES ($1, $2, $3, $4, $5, 10)`,
-          [tenantId, projectId, block.id, code === 'TOWER-A' ? 'Tower A' : 'Tower B', code],
+          `INSERT INTO floors (tenant_id, project_id, tower_id, floor_number, name)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [tenantId, projectId, towerA.id, floorNumber, `Floor ${floorNumber}`],
         );
       }
     }
