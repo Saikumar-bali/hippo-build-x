@@ -98,10 +98,45 @@ async function provisionSynchronously(payload) {
   }
 }
 
-function shouldSyncProvision(error) {
-  if (process.env.PROVISION_SYNC === 'true') return true;
+function classifyQueueFailure(error) {
   const message = String(error?.message || error || '');
-  return /Redis version needs|ECONNREFUSED|ETIMEDOUT|Connection is closed/i.test(message);
+  if (/Redis version needs/i.test(message)) return 'unsupported_version';
+  if (/ECONNREFUSED|ETIMEDOUT|Connection is closed/i.test(message)) return 'transient';
+  return 'fatal';
+}
+
+function canProvisionSynchronously() {
+  return process.env.PROVISION_SYNC === 'true' || Boolean(process.env.MIGRATION_DATABASE_URL);
+}
+
+function resetTransientQueueState() {
+  try {
+    _connection?.disconnect?.();
+  } catch {
+    // The connection is already unusable; dropping references is sufficient.
+  }
+  _connection = null;
+  _queue = null;
+}
+
+async function recordRetryableQueueFailure(payload, error) {
+  await updateJob(payload.provisioningJobId, {
+    status: 'queued',
+    currentStep: 'registered',
+    errorCode: 'QUEUE_RETRYABLE',
+    errorMessage: String(error.message).slice(0, 2000),
+  });
+}
+
+async function recordTerminalQueueFailure(payload, error, errorCode = 'QUEUE_UNAVAILABLE') {
+  await markTenantProvisioningFailed(payload.tenantId);
+  await updateJob(payload.provisioningJobId, {
+    status: 'failed',
+    currentStep: 'queue_failed',
+    errorCode,
+    errorMessage: String(error.message).slice(0, 2000),
+    finished: true,
+  });
 }
 
 /**
@@ -134,21 +169,43 @@ export async function enqueueTenantProvision(payload) {
     });
     return { mode: 'queue', bullmqJobId };
   } catch (error) {
-    if (!shouldSyncProvision(error)) {
-      await markTenantProvisioningFailed(payload.tenantId);
-      await updateJob(payload.provisioningJobId, {
-        status: 'failed',
-        currentStep: 'queue_failed',
-        errorCode: 'QUEUE_UNAVAILABLE',
-        errorMessage: String(error.message).slice(0, 2000),
-        finished: true,
-      });
+    const failureKind = classifyQueueFailure(error);
+
+    if (failureKind === 'unsupported_version') {
+      if (canProvisionSynchronously()) {
+        _queueUnavailable = String(error.message || error);
+        log.warn('Redis version unsupported; provisioning synchronously', {
+          err: String(error.message || error),
+        });
+        return provisionSynchronously(payload);
+      }
+      await recordTerminalQueueFailure(payload, error, 'QUEUE_REDIS_UNSUPPORTED');
       throw error;
     }
-    _queueUnavailable = error.message;
-    log.warn('BullMQ unavailable; provisioning synchronously', { err: error.message });
-    return provisionSynchronously(payload);
+
+    if (failureKind === 'transient') {
+      resetTransientQueueState();
+      log.warn('Transient BullMQ failure; queue state will be retried', {
+        err: String(error.message || error),
+      });
+
+      if (canProvisionSynchronously()) {
+        return provisionSynchronously(payload);
+      }
+
+      await recordRetryableQueueFailure(payload, error);
+      throw error;
+    }
+
+    await recordTerminalQueueFailure(payload, error);
+    throw error;
   }
+}
+
+export function __resetTenantProvisionQueueForTests() {
+  _connection = null;
+  _queue = null;
+  _queueUnavailable = null;
 }
 
 export { QUEUE_NAME as TENANT_PROVISION_QUEUE };
