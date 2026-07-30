@@ -1,17 +1,16 @@
 const globals = Object.fromEntries(
   [
-    // Node and shared web APIs
     'console', 'process', 'Buffer', 'global', '__dirname', '__filename', 'module', 'require',
     'exports', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask',
     'fetch', 'crypto', 'URL', 'URLSearchParams', 'Response', 'Request', 'Headers', 'FormData',
     'File', 'Blob', 'AbortController', 'TextEncoder', 'TextDecoder', 'structuredClone', 'atob', 'btoa',
-    // Browser/runtime
     'window', 'document', 'navigator', 'location', 'localStorage', 'sessionStorage', 'Event',
     'CustomEvent', 'WebSocket', 'HTMLElement', 'MutationObserver', 'ResizeObserver',
-    // Vitest and Playwright
     'describe', 'it', 'test', 'expect', 'beforeAll', 'afterAll', 'beforeEach', 'afterEach', 'vi',
   ].map((name) => [name, 'readonly']),
 );
+
+const unused = ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }];
 
 export default [
   {
@@ -67,7 +66,7 @@ export default [
       'no-unsafe-optional-chaining': 'error',
       'no-unused-labels': 'error',
       'no-unused-private-class-members': 'error',
-      'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'no-unused-vars': unused,
       'no-useless-backreference': 'error',
       'no-useless-catch': 'error',
       'no-useless-escape': 'error',
@@ -80,6 +79,19 @@ export default [
       'no-var': 'error',
       'prefer-const': 'error',
       'no-throw-literal': 'error',
+    },
+  },
+  {
+    // React component bindings are conventionally PascalCase and are consumed
+    // by JSX. Core ESLint does not mark JSX references without the React plugin,
+    // so retain strict checking for lowercase application variables while
+    // avoiding false positives for components and Ant Design subcomponents.
+    files: ['apps/web/**/*.{js,jsx}'],
+    rules: {
+      'no-unused-vars': [
+        'error',
+        { argsIgnorePattern: '^_', varsIgnorePattern: '^(?:_|[A-Z])' },
+      ],
     },
   },
   {
