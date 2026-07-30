@@ -1,30 +1,26 @@
+const globals = Object.fromEntries(
+  [
+    // Node and shared web APIs
+    'console', 'process', 'Buffer', 'global', '__dirname', '__filename', 'module', 'require',
+    'exports', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'queueMicrotask',
+    'fetch', 'crypto', 'URL', 'URLSearchParams', 'Response', 'Request', 'Headers', 'FormData',
+    'File', 'Blob', 'AbortController', 'TextEncoder', 'TextDecoder', 'structuredClone', 'atob', 'btoa',
+    // Browser/runtime
+    'window', 'document', 'navigator', 'location', 'localStorage', 'sessionStorage', 'Event',
+    'CustomEvent', 'WebSocket', 'HTMLElement', 'MutationObserver', 'ResizeObserver',
+    // Vitest and Playwright
+    'describe', 'it', 'test', 'expect', 'beforeAll', 'afterAll', 'beforeEach', 'afterEach', 'vi',
+  ].map((name) => [name, 'readonly']),
+);
+
 export default [
   {
     files: ['**/*.{js,jsx,mjs,cjs}'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
-      globals: {
-        console: 'readonly',
-        process: 'readonly',
-        setTimeout: 'readonly',
-        clearTimeout: 'readonly',
-        setInterval: 'readonly',
-        clearInterval: 'readonly',
-        fetch: 'readonly',
-        crypto: 'readonly',
-        URL: 'readonly',
-        Response: 'readonly',
-        Request: 'readonly',
-        Headers: 'readonly',
-        Buffer: 'readonly',
-        __dirname: 'readonly',
-        __filename: 'readonly',
-        module: 'readonly',
-        require: 'readonly',
-        exports: 'readonly',
-        global: 'readonly',
-      },
+      parserOptions: { ecmaFeatures: { jsx: true } },
+      globals,
     },
     linterOptions: { reportUnusedDisableDirectives: 'error' },
     rules: {
@@ -87,6 +83,14 @@ export default [
     },
   },
   {
-    ignores: ['dist/**', '.next/**', 'node_modules/**', '*.config.js', '*.config.mjs'],
+    ignores: [
+      'dist/**',
+      '.next/**',
+      'node_modules/**',
+      'playwright-report/**',
+      'test-results/**',
+      '*.config.js',
+      '*.config.mjs',
+    ],
   },
 ];
