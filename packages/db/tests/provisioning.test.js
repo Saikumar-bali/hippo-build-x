@@ -28,6 +28,7 @@ describe.skipIf(!hasDb)('locked control plane migrations', () => {
     const controlTables = await sql`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'control_plane'
+        AND table_type = 'BASE TABLE'
         AND table_name IN ('tenants', 'platform_users', 'provisioning_jobs', 'tenant_channels')
     `;
     expect(controlTables.map((row) => row.table_name).sort()).toEqual([
@@ -40,7 +41,10 @@ describe.skipIf(!hasDb)('locked control plane migrations', () => {
     const publicTables = await sql`
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'public'
-        AND table_name IN ('tenants', 'platform_users', 'tenant_migrations')
+        AND table_type = 'BASE TABLE'
+        AND table_name IN (
+          'control_plane_migrations', 'tenants', 'platform_users', 'tenant_migrations'
+        )
     `;
     expect(publicTables).toEqual([]);
   });
