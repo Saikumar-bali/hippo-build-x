@@ -135,4 +135,38 @@ describe('tenant provisioning queue fallback', () => {
     expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
     expect(mocks.provisionTenantSchema).toHaveBeenCalledTimes(2);
   });
+
+  it('does not reinterpret a post-enqueue database error as a Redis failure', async () => {
+    mocks.queueAdd.mockResolvedValue({ id: 'accepted' });
+    mocks.controlUnsafe.mockRejectedValueOnce(new Error('database connection reset'));
+
+    const queued = await enqueueTenantProvision(payload);
+
+    expect(queued).toMatchObject({ mode: 'queue' });
+    expect(mocks.queueAdd).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.controlQuery.mock.calls.some(([strings]) =>
+        strings.join(' ').includes("SET status = 'failed'"),
+      ),
+    ).toBe(false);
+    expect(mocks.warn).toHaveBeenCalledWith(
+      'Unable to reconcile durable provisioning job state',
+      expect.objectContaining({ currentStep: 'queued', mode: 'queue' }),
+    );
+  });
+
+  it('does not reverse synchronous provisioning when success reporting fails', async () => {
+    vi.stubEnv('PROVISION_SYNC', 'true');
+    mocks.controlUnsafe.mockRejectedValue(new Error('database connection reset'));
+
+    const result = await enqueueTenantProvision(payload);
+
+    expect(result.mode).toBe('sync');
+    expect(mocks.provisionTenantSchema).toHaveBeenCalledTimes(1);
+    expect(
+      mocks.controlQuery.mock.calls.some(([strings]) =>
+        strings.join(' ').includes("SET status = 'failed'"),
+      ),
+    ).toBe(false);
+  });
 });
