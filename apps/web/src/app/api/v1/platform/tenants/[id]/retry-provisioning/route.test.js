@@ -76,6 +76,15 @@ vi.mock('@/lib/queues', () => ({
 
 const { POST } = await import('./route.js');
 
+function request(key = IDEMPOTENCY_KEY) {
+  return new Request(`http://localhost/api/v1/platform/tenants/${TENANT_ID}/retry-provisioning`, {
+    method: 'POST',
+    headers: { 'idempotency-key': key },
+  });
+}
+
+const context = { params: Promise.resolve({ id: TENANT_ID }) };
+
 describe('retry provisioning idempotency', () => {
   beforeEach(() => {
     state.tenant.status = 'failed';
@@ -87,13 +96,6 @@ describe('retry provisioning idempotency', () => {
   });
 
   it('replays the same durable job instead of violating the unique key', async () => {
-    const request = () =>
-      new Request(`http://localhost/api/v1/platform/tenants/${TENANT_ID}/retry-provisioning`, {
-        method: 'POST',
-        headers: { 'idempotency-key': IDEMPOTENCY_KEY },
-      });
-    const context = { params: Promise.resolve({ id: TENANT_ID }) };
-
     const first = await POST(request(), context);
     const second = await POST(request(), context);
 
@@ -102,4 +104,24 @@ describe('retry provisioning idempotency', () => {
     expect(second.meta).toEqual({ idempotentReplay: true });
     expect(state.enqueue).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['active', 'provisioning', 'suspended'])(
+    'rejects retry requests while tenant status is %s',
+    async (status) => {
+      state.tenant.status = status;
+
+      await expect(POST(request(`retry-${status}`), context)).rejects.toMatchObject({
+        code: 'INVALID_STATE_TRANSITION',
+        statusCode: 409,
+        details: {
+          tenantId: TENANT_ID,
+          currentStatus: status,
+          requiredStatus: 'failed',
+        },
+      });
+
+      expect(state.job).toBeNull();
+      expect(state.enqueue).not.toHaveBeenCalled();
+    },
+  );
 });
