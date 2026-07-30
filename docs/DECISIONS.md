@@ -45,40 +45,61 @@ Format:
 - **Date**: 2026-07-27
 - **Status**: Accepted
 - **Context**: Need strong tenant isolation for data security and compliance.
-- **Decision**: Each tenant gets a dedicated PostgreSQL schema. A control-plane registry manages tenants.
-- **Consequences**: Migrations run across all tenant schemas. Tenant context is required for all data access. See DEC-007 for control-plane location.
+- **Decision**: Each tenant gets a dedicated PostgreSQL schema. A shared control-plane registry manages tenant identity and data-source routing.
+- **Consequences**: Migrations run across tenant schemas. Tenant context is required for all business data access. See DEC-007 and DEC-010.
 
 ## DEC-005: Deployment Topology — Next.js + Containerized Worker
 
 - **Date**: 2026-07-29
 - **Status**: Accepted
-- **Context**: PRD Q1 left open whether to deploy all-Vercel (NestJS incompatible) vs split. The repo already uses Next.js App Router for UI and `/api/v1` routes plus a BullMQ worker.
-- **Decision**: Deploy Next.js (UI + API routes) on a Node host or Vercel-compatible runtime; run the BullMQ worker as a separate long-lived container/process. Use Neon-compatible PostgreSQL and managed Redis. Do not use NestJS or a separate Vite SPA.
-- **Consequences**: Closes PRD Q1. Supersedes NestJS/Vite stack guidance in the PRD for implementation. WebSocket service remains optional/deferred.
+- **Context**: PRD Q1 left open whether to deploy all-Vercel vs split. The repo already uses Next.js App Router for UI and `/api/v1` routes plus a BullMQ worker.
+- **Decision**: Deploy Next.js on a Node host or Vercel-compatible runtime; run the BullMQ worker as a separate long-lived process. Use Neon-compatible PostgreSQL and managed Redis.
+- **Consequences**: Supersedes NestJS/Vite guidance. WebSocket service remains optional/deferred.
 
 ## DEC-006: UI Kit — Ant Design
 
 - **Date**: 2026-07-29
 - **Status**: Accepted
-- **Context**: DEC-003 specified Tailwind and excluded Ant Design, but `apps/web` and the taste theme package already use Ant Design 5.
-- **Decision**: Use Ant Design 5 (+ Ant Design icons / Next.js registry) as the primary UI kit. Tailwind is not required for Phase 0+.
-- **Consequences**: Supersedes the Tailwind-only / no-Ant-Design portion of DEC-003. Design work follows Ant Design patterns and the repo taste profile.
+- **Context**: DEC-003 specified Tailwind and excluded Ant Design, but `apps/web` already uses Ant Design 5.
+- **Decision**: Use Ant Design 5 as the primary UI kit.
+- **Consequences**: Supersedes the Tailwind-only portion of DEC-003.
+
+## DEC-007: Explicit Control Plane Schema
+
+- **Date**: 2026-07-30
+- **Status**: Accepted
+- **Context**: Early Phase 0 code placed shared application tables in `public`, while PRD §5 locks a distinct control plane and tenant schemas.
+- **Decision**: All shared SaaS records live under PostgreSQL schema `control_plane`. `public` is not an application data store. Transitional read-only views may exist for one rolling-release window.
+- **Consequences**: Control-plane access uses a dedicated context factory. Tenant search paths exclude `public`. Platform and tenant modules cannot silently fall through to shared tables.
 
 ## DEC-008: Argon2id Passwords and Cookie Sessions
 
 - **Date**: 2026-07-29
 - **Status**: Accepted
-- **Context**: Phase 1 requires secure identity. Blueprint mandates Argon2id hashes and short-lived access tokens with rotating refresh tokens. Web needs HttpOnly cookies; mobile will use Bearer tokens against the same API.
-- **Decision**: Hash passwords with Argon2id via `hash-wasm` (portable across Next.js bundling). Issue `access_token` (15m) and `refresh_token` (7d) as HttpOnly cookies for web. Persist refresh token hashes in tenant `sessions` for rotation and revocation. Accept `Authorization: Bearer` for API/mobile clients.
-- **Consequences**: bcryptjs is removed from the auth path. Suspended/deleted users are rejected on every authenticated request. Reused rotated refresh tokens are denied.
+- **Context**: Phase 1 requires secure identity. Blueprint mandates Argon2id hashes and short-lived access tokens with rotating refresh tokens.
+- **Decision**: Hash passwords with Argon2id. Issue 15-minute access tokens and 7-day rotating refresh tokens as HttpOnly cookies for web. Persist tenant refresh-token hashes in tenant `sessions`.
+- **Consequences**: Suspended/deleted users are rejected on every request. Reused rotated refresh tokens are denied.
 
 ## DEC-009: Super Admin Capabilities Mapped to Phases
 
 - **Date**: 2026-07-29
 - **Status**: Accepted
-- **Context**: PRD §3 named Super Admin jobs (provision, monitor health, manage plans) without phase DoDs, while the Blueprint only detailed provision in Phase 0. That left suspend/pause/plans/ops underspecified.
-- **Decision**: Canonical Super Admin map (must stay identical in PRD §3.1 and Blueprint master roadmap):
-  - **Phase 0** — provision tenants (platform APIs + worker).
+- **Context**: PRD §3 named Super Admin jobs without complete phase ownership.
+- **Decision**:
+  - **Phase 0** — provision tenants.
   - **Phase 1** — platform super-admin login; authenticated create/list tenants; tenant-owned flags/branding/channels.
-  - **Phase 12** — suspend/resume, platform-forced kill-switches, plans/subscriptions, cross-tenant health, force session revoke, export/deletion.
-- **Consequences**: No orphan Super Admin features. Changes to this map require updating PRD, Blueprint, and the Git-centric Phase 0/1/12 sections in the same change.
+  - **Phase 12** — suspend/resume, platform-forced flags, plans/subscriptions, cross-tenant health, force session revoke, export/deletion.
+- **Consequences**: No orphan Super Admin features. Changes require PRD and Blueprint updates in the same PR.
+
+## DEC-010: Authoritative Tenant Data-Source Resolution
+
+- **Date**: 2026-07-30
+- **Status**: Accepted
+- **Context**: Slugs can be renamed and tokens are client-controlled inputs. Neither is a safe database locator. Large P2 tenants also need a path to dedicated databases without changing APIs.
+- **Decision**:
+  - New shared schemas are named from immutable tenant UUIDs: `tenant_<uuid-without-hyphens>`.
+  - Access/refresh tokens contain `tenantId`, not schema names, connection URLs or authorization arrays.
+  - Every request resolves `isolation_mode`, `schema_name` and future `database_secret_ref` from `control_plane.tenants`.
+  - Tenant SQL is transaction-bound, requires `tenantId`, excludes `public`, sets `app.tenant_id`, and runs behind forced RLS policies bound to the schema owner.
+  - Tenant migration state is recorded both locally and centrally with checksums.
+- **Consequences**: Existing slug-named schemas remain supported. New tenants use immutable names. Moving a P2 tenant to a dedicated database changes only the control-plane locator, not tokens or API contracts. Schema-qualified hostile access is covered by mandatory CI.
