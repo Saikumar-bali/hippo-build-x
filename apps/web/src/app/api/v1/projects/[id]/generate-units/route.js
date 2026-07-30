@@ -20,7 +20,9 @@ export const POST = withApiHandler(
     const { id } = await context.params;
     assertProjectAccess(ctx, id);
     const body = await parseBody(request);
-    if (!body.towerId || body.floorFrom == null || body.floorTo == null) {
+    const floorFromMissing = body.floorFrom === null || body.floorFrom === undefined;
+    const floorToMissing = body.floorTo === null || body.floorTo === undefined;
+    if (!body.towerId || floorFromMissing || floorToMissing) {
       throw AppError.validation('towerId, floorFrom, and floorTo are required');
     }
     const sql = tenantSql();
