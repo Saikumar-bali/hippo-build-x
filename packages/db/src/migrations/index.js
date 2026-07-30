@@ -31,6 +31,26 @@ async function grantRuntimeAccess(tx, schemaName) {
   await tx.unsafe(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ${schema} TO ${role}`);
   await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ${role}`);
   await tx.unsafe(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${schema} GRANT USAGE, SELECT ON SEQUENCES TO ${role}`);
+
+  // Compatibility views live in public for one rolling-release window. Views
+  // have independent ACLs, so granting the underlying control-plane tables is
+  // insufficient for older instances whose search path still resolves here.
+  if (schemaName === 'control_plane') {
+    const compatibilityViews = await tx`
+      SELECT table_name
+      FROM information_schema.views
+      WHERE table_schema = 'public'
+        AND table_name IN ('tenants', 'tenant_migrations', 'platform_users')
+      ORDER BY table_name
+    `;
+    if (compatibilityViews.length) {
+      const qualifiedViews = compatibilityViews
+        .map((row) => `public."${row.table_name}"`)
+        .join(', ');
+      await tx.unsafe(`GRANT USAGE ON SCHEMA public TO ${role}`);
+      await tx.unsafe(`GRANT SELECT ON ${qualifiedViews} TO ${role}`);
+    }
+  }
 }
 
 export async function runControlPlaneMigrations() {
