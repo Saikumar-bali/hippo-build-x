@@ -33,13 +33,13 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: hippo
-          POSTGRES_PASSWORD: hippo
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hippo_test
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U hippo -d hippo_test"
+          --health-cmd "pg_isready -U postgres -d hippo_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -54,7 +54,7 @@ jobs:
           --health-retries 10
 
     env:
-      DATABASE_URL: postgres://hippo:hippo@localhost:5432/hippo_test
+      DATABASE_URL: postgres://hippo_runtime:hippo@localhost:5432/hippo_test
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-access-secret-at-least-32-characters
       JWT_REFRESH_SECRET: ci-refresh-secret-at-least-32-characters
@@ -74,6 +74,15 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+      - name: Create non-superuser runtime role
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d hippo_test -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE hippo_runtime LOGIN PASSWORD 'hippo' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+          ALTER DATABASE hippo_test OWNER TO hippo_runtime;
+          GRANT ALL ON SCHEMA public TO hippo_runtime;
+          SQL
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Database unit and hostile isolation tests
@@ -95,13 +104,13 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: hippo
-          POSTGRES_PASSWORD: hippo
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
           POSTGRES_DB: hippo_e2e
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U hippo -d hippo_e2e"
+          --health-cmd "pg_isready -U postgres -d hippo_e2e"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -116,7 +125,7 @@ jobs:
           --health-retries 10
 
     env:
-      DATABASE_URL: postgres://hippo:hippo@localhost:5432/hippo_e2e
+      DATABASE_URL: postgres://hippo_runtime:hippo@localhost:5432/hippo_e2e
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-access-secret-at-least-32-characters
       JWT_REFRESH_SECRET: ci-refresh-secret-at-least-32-characters
@@ -137,6 +146,15 @@ jobs:
         with:
           node-version: 20
           cache: pnpm
+      - name: Create non-superuser runtime role
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d hippo_e2e -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE hippo_runtime LOGIN PASSWORD 'hippo' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+          ALTER DATABASE hippo_e2e OWNER TO hippo_runtime;
+          GRANT ALL ON SCHEMA public TO hippo_runtime;
+          SQL
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
       - name: Install Chromium
