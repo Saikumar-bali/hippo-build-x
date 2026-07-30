@@ -15,7 +15,7 @@ test('Keystone Civil tenant admin login', async ({ page }) => {
   await page.getByRole('button', { name: 'Login' }).click();
 
   await page.waitForURL('**/dashboard', { timeout: 15000 });
-  await expect(page.getByText('Dashboard').or(page.getByText('Welcome'))).toBeVisible({ timeout: 10000 });
+  await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
 
   // Verify we see the Keystone Civil context
   await expect(page.getByText(/david|keystone|ops/i).first()).toBeVisible();
