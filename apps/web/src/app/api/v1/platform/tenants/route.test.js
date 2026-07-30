@@ -1,13 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const TENANT_ID = '11111111-1111-4111-8111-111111111111';
 const JOB_ID = '22222222-2222-4222-8222-222222222222';
 const PLATFORM_USER_ID = '33333333-3333-4333-8333-333333333333';
 const IDEMPOTENCY_KEY = 'tenant-create-race-key';
+const PAYLOAD = { adminEmail: 'admin@concurrent.test', adminName: 'Concurrent Admin' };
 
 const state = vi.hoisted(() => ({
   tenant: null,
   job: null,
   enqueue: vi.fn(),
+  precheckMode: 'state',
   precheckCount: 0,
   releasePrechecks: null,
   transactionTail: Promise.resolve(),
@@ -21,6 +24,7 @@ function tenantProjection() {
     provisioning_job_status: state.job.status,
     provisioning_current_step: state.job.current_step,
     provisioning_attempt_count: state.job.attempt_count,
+    provisioning_job_payload: state.job.payload,
   };
 }
 
@@ -50,7 +54,7 @@ function makeQuery({ transaction = false } = {}) {
       return [state.tenant];
     }
     if (text.includes('INSERT INTO provisioning_jobs')) {
-      const [tenantId, idempotencyKey] = values;
+      const [tenantId, idempotencyKey, _status, _step, _requestedBy, payload] = values;
       state.job = {
         id: JOB_ID,
         tenant_id: tenantId,
@@ -58,6 +62,7 @@ function makeQuery({ transaction = false } = {}) {
         status: 'queued',
         current_step: 'registered',
         attempt_count: 0,
+        payload: JSON.parse(payload),
       };
       return [state.job];
     }
@@ -68,6 +73,7 @@ function makeQuery({ transaction = false } = {}) {
   query.unsafe = async (text) => {
     if (text.includes('same_job.idempotency_key')) {
       if (transaction) return state.job ? [tenantProjection()] : [];
+      if (state.precheckMode === 'state') return state.job ? [tenantProjection()] : [];
 
       state.precheckCount += 1;
       if (state.precheckCount === 1) {
@@ -114,7 +120,7 @@ vi.mock('@/lib/api-utils', () => ({
 }));
 
 vi.mock('@hippo/db', () => ({
-  toTenantSchemaName: (id) => `tenant_${id.replaceAll('-', '')}`,
+  toTenantSchemaName: () => 'tenant_11111111111141118111111111111111',
   TENANT_STATUS: { PROVISIONING: 'provisioning' },
   ISOLATION_MODE: { SHARED_SCHEMA: 'shared_schema' },
 }));
@@ -141,10 +147,52 @@ vi.mock('@/lib/queues', () => ({
 
 const { POST } = await import('./route.js');
 
+function request() {
+  return new Request('http://localhost/api/v1/platform/tenants', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'idempotency-key': IDEMPOTENCY_KEY,
+    },
+    body: JSON.stringify({
+      name: 'Concurrent Tenant',
+      slug: 'concurrent-tenant',
+      adminEmail: PAYLOAD.adminEmail,
+      adminName: PAYLOAD.adminName,
+    }),
+  });
+}
+
+function seedCommittedRegisteredJob() {
+  state.tenant = {
+    id: TENANT_ID,
+    name: 'Concurrent Tenant',
+    slug: 'concurrent-tenant',
+    schema_name: 'tenant_11111111111141118111111111111111',
+    status: 'provisioning',
+    isolation_mode: 'shared_schema',
+    database_region: null,
+    migration_version: null,
+    data_location_status: 'provisioning',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  state.job = {
+    id: JOB_ID,
+    tenant_id: TENANT_ID,
+    idempotency_key: IDEMPOTENCY_KEY,
+    status: 'queued',
+    current_step: 'registered',
+    attempt_count: 0,
+    payload: PAYLOAD,
+  };
+}
+
 describe('tenant creation idempotency', () => {
   beforeEach(() => {
     state.tenant = null;
     state.job = null;
+    state.precheckMode = 'state';
     state.precheckCount = 0;
     state.releasePrechecks = null;
     state.transactionTail = Promise.resolve();
@@ -156,21 +204,7 @@ describe('tenant creation idempotency', () => {
   });
 
   it('atomically replays concurrent requests with the same idempotency key', async () => {
-    const request = () =>
-      new Request('http://localhost/api/v1/platform/tenants', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'idempotency-key': IDEMPOTENCY_KEY,
-        },
-        body: JSON.stringify({
-          name: 'Concurrent Tenant',
-          slug: 'concurrent-tenant',
-          adminEmail: 'admin@concurrent.test',
-          adminName: 'Concurrent Admin',
-        }),
-      });
-
+    state.precheckMode = 'barrier';
     const [first, second] = await Promise.all([POST(request()), POST(request())]);
     const responses = [first, second];
 
@@ -179,7 +213,32 @@ describe('tenant creation idempotency', () => {
     expect(responses.find((response) => response.status === 200).meta).toEqual({
       idempotentReplay: true,
     });
-    expect(state.enqueue).toHaveBeenCalledTimes(1);
+    expect(state.enqueue.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(
+      state.enqueue.mock.calls.every(
+        ([payload]) => payload.provisioningJobId === JOB_ID && payload.tenantId === TENANT_ID,
+      ),
+    ).toBe(true);
     expect(state.job.idempotency_key).toBe(IDEMPOTENCY_KEY);
+  });
+
+  it('enqueues a committed registered job when the original process died before dispatch', async () => {
+    seedCommittedRegisteredJob();
+
+    const replay = await POST(request());
+
+    expect(replay.status).toBe(200);
+    expect(replay.meta).toEqual({ idempotentReplay: true });
+    expect(replay.data.provisioning_job_id).toBe(JOB_ID);
+    expect(replay.data.provisioning_job_payload).toBeUndefined();
+    expect(state.enqueue).toHaveBeenCalledTimes(1);
+    expect(state.enqueue).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      schemaName: state.tenant.schema_name,
+      slug: state.tenant.slug,
+      adminEmail: PAYLOAD.adminEmail,
+      adminName: PAYLOAD.adminName,
+      provisioningJobId: JOB_ID,
+    });
   });
 });
