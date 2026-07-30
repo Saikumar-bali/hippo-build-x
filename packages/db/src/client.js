@@ -5,32 +5,37 @@ import * as controlPlaneSchema from './schema/control-plane.js';
 export const CONTROL_PLANE_SCHEMA = 'control_plane';
 
 let _sql = null;
+let _migrationSql = null;
 let _db = null;
 
-/**
- * Get the raw postgres.js client used only by migrations, health checks and
- * context factories. Business modules must use createControlPlaneSql or
- * createTenantSql instead of issuing global queries.
- */
+/** Restricted NOSUPERUSER/NOBYPASSRLS runtime connection. */
 export function getSql() {
   if (!_sql) {
-    const DATABASE_URL = process.env.DATABASE_URL;
-    if (!DATABASE_URL) {
-      throw new Error('DATABASE_URL is not set');
-    }
-    _sql = postgres(DATABASE_URL, { max: 10 });
+    const url = process.env.DATABASE_URL;
+    if (!url) throw new Error('DATABASE_URL is not set');
+    _sql = postgres(url, { max: 10 });
   }
   return _sql;
 }
 
 /**
- * Control-plane Drizzle client. Tenant tables are deliberately excluded so a
- * global Drizzle client can never become an accidental tenant data path.
+ * Operator connection used only by checked-in migration/provisioning code.
+ * Development/test may deliberately use the runtime URL as a fallback.
  */
-export function getDb() {
-  if (!_db) {
-    _db = drizzle(getSql(), { schema: controlPlaneSchema });
+export function getMigrationSql() {
+  if (!_migrationSql) {
+    const url = process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL;
+    if (!url) throw new Error('MIGRATION_DATABASE_URL or DATABASE_URL is required');
+    if (process.env.NODE_ENV === 'production' && !process.env.MIGRATION_DATABASE_URL) {
+      throw new Error('MIGRATION_DATABASE_URL is required in production');
+    }
+    _migrationSql = postgres(url, { max: 3 });
   }
+  return _migrationSql;
+}
+
+export function getDb() {
+  if (!_db) _db = drizzle(getSql(), { schema: controlPlaneSchema });
   return _db;
 }
 
@@ -49,100 +54,72 @@ async function bindTenant(tx, schemaName, tenantId) {
   await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
 }
 
-/**
- * Create a control-plane SQL helper. Every query is transaction-bound and the
- * search path excludes public.
- */
 export function createControlPlaneSql() {
   const sql = getSql();
-
-  async function controlQuery(strings, ...values) {
+  async function query(strings, ...values) {
     return sql.begin(async (tx) => {
       await bindControlPlane(tx);
-      if (typeof strings === 'string') return tx.unsafe(strings, values);
-      return tx(strings, ...values);
+      return typeof strings === 'string' ? tx.unsafe(strings, values) : tx(strings, ...values);
     });
   }
-
-  controlQuery.unsafe = async (query, params = []) =>
+  query.unsafe = (text, params = []) =>
     sql.begin(async (tx) => {
       await bindControlPlane(tx);
-      return tx.unsafe(query, params);
+      return tx.unsafe(text, params);
     });
-
-  controlQuery.begin = async (callback) =>
+  query.begin = (callback) =>
     sql.begin(async (tx) => {
       await bindControlPlane(tx);
       return callback(tx);
     });
-
-  controlQuery.schemaName = CONTROL_PLANE_SCHEMA;
-  return controlQuery;
+  query.schemaName = CONTROL_PLANE_SCHEMA;
+  return query;
 }
 
-/**
- * Create a tenant-scoped SQL helper. A tenant id is mandatory because tenant
- * tables use forced RLS as a second isolation boundary in addition to schemas.
- * @param {string} schemaName
- * @param {string} tenantId
- */
 export function createTenantSql(schemaName, tenantId) {
   if (!schemaName || !/^tenant_[a-z0-9_]+$/.test(schemaName)) {
     throw new Error(`Invalid tenant schema: ${schemaName}`);
   }
   assertTenantId(tenantId);
   const sql = getSql();
-
-  async function tenantQuery(strings, ...values) {
+  async function query(strings, ...values) {
     return sql.begin(async (tx) => {
       await bindTenant(tx, schemaName, tenantId);
-      if (typeof strings === 'string') return tx.unsafe(strings, values);
-      return tx(strings, ...values);
+      return typeof strings === 'string' ? tx.unsafe(strings, values) : tx(strings, ...values);
     });
   }
-
-  tenantQuery.unsafe = async (query, params = []) =>
+  query.unsafe = (text, params = []) =>
     sql.begin(async (tx) => {
       await bindTenant(tx, schemaName, tenantId);
-      return tx.unsafe(query, params);
+      return tx.unsafe(text, params);
     });
-
-  tenantQuery.begin = async (callback) =>
+  query.begin = (callback) =>
     sql.begin(async (tx) => {
       await bindTenant(tx, schemaName, tenantId);
       return callback(tx);
     });
-
-  tenantQuery.schemaName = schemaName;
-  tenantQuery.tenantId = tenantId;
-  return tenantQuery;
+  query.schemaName = schemaName;
+  query.tenantId = tenantId;
+  return query;
 }
 
-/**
- * Execute multiple tenant operations in one transaction.
- */
 export async function withTenantTransaction(schemaName, tenantId, callback) {
   return createTenantSql(schemaName, tenantId).begin(callback);
 }
 
-/**
- * Removed by the locked tenancy architecture. A long-lived Drizzle client
- * cannot safely carry request-local tenant identity or forced-RLS context.
- */
 export function createTenantDb() {
   throw new Error('createTenantDb is disabled; use createTenantSql/withTenantTransaction');
 }
 
 export async function pingDatabase() {
-  const sql = getSql();
-  const [row] = await sql`SELECT 1 AS ok`;
+  const [row] = await getSql()`SELECT 1 AS ok`;
   return row?.ok === 1;
 }
 
 export async function closeDb() {
-  if (_sql) {
-    await _sql.end({ timeout: 5 });
-    _sql = null;
-    _db = null;
-  }
+  const clients = [_sql, _migrationSql].filter(Boolean);
+  await Promise.all(clients.map((client) => client.end({ timeout: 5 })));
+  _sql = null;
+  _migrationSql = null;
+  _db = null;
 }
