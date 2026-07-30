@@ -1,0 +1,172 @@
+name: Multi-tenancy isolation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/web/**'
+      - 'apps/worker/**'
+      - 'packages/db/**'
+      - 'scripts/e2e-phase0.js'
+      - '.github/workflows/multitenancy-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/web/**'
+      - 'apps/worker/**'
+      - 'packages/db/**'
+      - 'scripts/e2e-phase0.js'
+      - '.github/workflows/multitenancy-ci.yml'
+
+concurrency:
+  group: multitenancy-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  isolation-contract:
+    name: Database isolation contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hippo
+          POSTGRES_PASSWORD: hippo
+          POSTGRES_DB: hippo_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hippo -d hippo_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://hippo:hippo@localhost:5432/hippo_test
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-access-secret-at-least-32-characters
+      JWT_REFRESH_SECRET: ci-refresh-secret-at-least-32-characters
+      CHANNEL_CONFIG_KEY: ci-channel-key-at-least-32-characters
+      CHANNEL_CONFIG_KEY_VERSION: ci-v1
+      PLATFORM_API_KEY: ci-platform-api-key
+      COOKIE_SECURE: 'false'
+      NODE_ENV: test
+      NEXT_TELEMETRY_DISABLED: '1'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Database unit and hostile isolation tests
+        run: pnpm --filter @hippo/db test
+      - name: Auth, RBAC and property integration tests
+        run: pnpm --filter @hippo/web test
+      - name: PRD section 5 end-to-end database proof
+        run: pnpm test:e2e:phase0
+      - name: Lint
+        run: pnpm lint
+      - name: Production build
+        run: pnpm build
+
+  platform-console-e2e:
+    name: Platform console browser proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hippo
+          POSTGRES_PASSWORD: hippo
+          POSTGRES_DB: hippo_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U hippo -d hippo_e2e"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://hippo:hippo@localhost:5432/hippo_e2e
+      REDIS_URL: redis://localhost:6379
+      JWT_SECRET: ci-access-secret-at-least-32-characters
+      JWT_REFRESH_SECRET: ci-refresh-secret-at-least-32-characters
+      CHANNEL_CONFIG_KEY: ci-channel-key-at-least-32-characters
+      CHANNEL_CONFIG_KEY_VERSION: ci-v1
+      PLATFORM_API_KEY: ci-platform-api-key
+      COOKIE_SECURE: 'false'
+      PROVISION_SYNC: 'true'
+      NEXT_TELEMETRY_DISABLED: '1'
+      BASE_URL: http://localhost:3000
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Chromium
+        run: pnpm --filter @hippo/web exec playwright install --with-deps chromium
+      - name: Seed control plane and demonstration tenant
+        run: pnpm --filter @hippo/db db:seed
+      - name: Start Next.js
+        run: |
+          pnpm --filter @hippo/web dev > /tmp/hippo-web.log 2>&1 &
+          echo $! > /tmp/hippo-web.pid
+          for attempt in {1..60}; do
+            if curl --fail --silent http://localhost:3000/api/v1/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          cat /tmp/hippo-web.log
+          exit 1
+      - name: Run tenant lifecycle browser proof
+        run: pnpm --filter @hippo/web exec playwright test e2e/tenant-lifecycle.spec.js --config=playwright.config.js
+      - name: Print server log on failure
+        if: failure()
+        run: cat /tmp/hippo-web.log || true
+      - name: Upload Playwright evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: multitenancy-playwright-evidence
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          if-no-files-found: ignore
+          retention-days: 14
