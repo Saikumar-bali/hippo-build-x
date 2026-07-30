@@ -43,6 +43,9 @@ test.describe('Locked tenant lifecycle', () => {
     await expect(drawer.getByText('Channel credential vault')).toBeVisible();
 
     await expect(page.locator('.ant-table-tbody')).toContainText('ACTIVE', { timeout: 30000 });
+    const drawerStatus = drawer.locator('.ant-descriptions-row').filter({ hasText: 'Status' });
+    await expect(drawerStatus).toContainText('active', { timeout: 10000 });
+    await expect(drawer.locator('.ant-steps-item-finish')).toHaveCount(8);
     await page.locator('.ant-drawer-close').click();
 
     await page.getByRole('button', { name: 'Logout' }).click();
