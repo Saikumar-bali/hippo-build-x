@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -34,6 +34,7 @@ import {
   SyncOutlined,
 } from '@ant-design/icons';
 import { useRouter } from 'next/navigation';
+import { shouldApplyTenantDetailResponse } from '@/modules/platform/tenant-detail-selection.js';
 
 const { Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -102,6 +103,7 @@ export default function PlatformTenantsPage() {
   const [selected, setSelected] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [retryingId, setRetryingId] = useState(null);
+  const selectedIdRef = useRef(null);
   const [form] = Form.useForm();
 
   const load = useCallback(
@@ -135,34 +137,62 @@ export default function PlatformTenantsPage() {
     [router],
   );
 
-  const loadDetail = useCallback(async (id, { quiet = false } = {}) => {
-    if (!id) return false;
-    if (!quiet) setDetailLoading(true);
-    try {
-      const res = await fetch(`/api/v1/platform/tenants/${id}`, { cache: 'no-store' });
-      const json = await res.json();
-      if (!res.ok) {
+  const closeDetail = useCallback(() => {
+    selectedIdRef.current = null;
+    setSelected(null);
+    setDetailLoading(false);
+  }, []);
+
+  const loadDetail = useCallback(
+    async (id, { quiet = false, signal } = {}) => {
+      if (!id) return false;
+      if (!quiet && selectedIdRef.current === id) setDetailLoading(true);
+
+      try {
+        const res = await fetch(`/api/v1/platform/tenants/${id}`, {
+          cache: 'no-store',
+          signal,
+        });
+        const json = await res.json();
+        if (!shouldApplyTenantDetailResponse(selectedIdRef.current, id, signal?.aborted)) {
+          return false;
+        }
+        if (!res.ok) {
+          if (!quiet) {
+            message.error(json.errors?.[0]?.message || 'Unable to load tenant');
+            closeDetail();
+          }
+          return false;
+        }
+        setSelected(json.data);
+        return true;
+      } catch (requestError) {
+        if (
+          requestError?.name === 'AbortError' ||
+          !shouldApplyTenantDetailResponse(selectedIdRef.current, id, signal?.aborted)
+        ) {
+          return false;
+        }
         if (!quiet) {
-          message.error(json.errors?.[0]?.message || 'Unable to load tenant');
-          setSelected(null);
+          message.error('Unable to load tenant details');
+          closeDetail();
         }
         return false;
+      } finally {
+        if (
+          !quiet &&
+          shouldApplyTenantDetailResponse(selectedIdRef.current, id, signal?.aborted)
+        ) {
+          setDetailLoading(false);
+        }
       }
-      setSelected(json.data);
-      return true;
-    } catch {
-      if (!quiet) {
-        message.error('Unable to load tenant details');
-        setSelected(null);
-      }
-      return false;
-    } finally {
-      if (!quiet) setDetailLoading(false);
-    }
-  }, []);
+    },
+    [closeDetail],
+  );
 
   const openDetail = useCallback(
     async (id) => {
+      selectedIdRef.current = id;
       setSelected({ id });
       await loadDetail(id);
     },
@@ -180,20 +210,26 @@ export default function PlatformTenantsPage() {
   useEffect(() => {
     if (!hasWorkInProgress && !selectedInProgress) return undefined;
 
+    const controller = new AbortController();
     let refreshing = false;
     const refresh = async () => {
       if (refreshing) return;
       refreshing = true;
       try {
         await load({ quiet: true });
-        if (selectedId) await loadDetail(selectedId, { quiet: true });
+        if (selectedId) {
+          await loadDetail(selectedId, { quiet: true, signal: controller.signal });
+        }
       } finally {
         refreshing = false;
       }
     };
 
     const timer = setInterval(refresh, 4000);
-    return () => clearInterval(timer);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
   }, [hasWorkInProgress, load, loadDetail, selectedId, selectedInProgress]);
 
   const stats = useMemo(
@@ -506,7 +542,7 @@ export default function PlatformTenantsPage() {
       <Drawer
         title={selected?.name || 'Tenant details'}
         open={Boolean(selected)}
-        onClose={() => setSelected(null)}
+        onClose={closeDetail}
         width={620}
         loading={detailLoading}
         extra={
