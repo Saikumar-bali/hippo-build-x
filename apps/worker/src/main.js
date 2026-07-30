@@ -12,6 +12,7 @@ import {
   getProvisioningAttemptState,
   getProvisioningFailureTransition,
 } from './provisioning-attempt.js';
+import { reportProvisioningStep } from './provisioning-progress.js';
 
 const log = createLogger({ service: 'hippo-worker' });
 validateEnv(workerEnvSchema);
@@ -91,10 +92,24 @@ const tenantProvisionWorker = new Worker(
       const result = await provisionTenantSchema(tenantId, schemaName, {
         adminEmail,
         adminName,
-        onStep: async (currentStep) => {
-          await job.updateProgress({ currentStep });
-          await updateProvisioningJob(provisioningJobId, { status: 'running', currentStep });
-        },
+        onStep: (currentStep) =>
+          reportProvisioningStep({
+            currentStep,
+            updateDurableState: (step) =>
+              updateProvisioningJob(provisioningJobId, {
+                status: 'running',
+                currentStep: step,
+              }),
+            updateProgress: (step) => job.updateProgress({ currentStep: step }),
+            onProgressError: (error, step) =>
+              log.warn('Unable to report BullMQ provisioning progress', {
+                tenantId,
+                provisioningJobId,
+                jobId: job.id,
+                currentStep: step,
+                err: String(error?.message || error),
+              }),
+          }),
       });
       await updateProvisioningJob(provisioningJobId, {
         status: 'completed',
