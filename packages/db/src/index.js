@@ -6,6 +6,7 @@ export {
   assertSafeSchemaName,
   runControlPlaneMigrations,
   runTenantMigrations,
+  runTenantMigrationFleet,
   seedTenantDefaults,
   provisionTenantSchema,
   rollbackTenantProvisioning,
