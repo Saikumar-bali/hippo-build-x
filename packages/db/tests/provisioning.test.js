@@ -3,10 +3,12 @@ import {
   runControlPlaneMigrations,
   provisionTenantSchema,
   runTenantMigrations,
+  runTenantMigrationFleet,
   rollbackTenantProvisioning,
   toTenantSchemaName,
   closeDb,
   getSql,
+  getMigrationSql,
   createControlPlaneSql,
   createTenantSql,
   TENANT_STATUS,
@@ -125,6 +127,30 @@ describe.skipIf(!hasDb)('tenant provisioning state', () => {
         verification_status: 'not_configured',
       },
     ]);
+  });
+
+  it('upgrades an already-active tenant through the fleet runner', async () => {
+    const operator = getMigrationSql();
+    await operator.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL search_path TO "${schemaName}", pg_catalog`);
+      await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      await tx.unsafe(`ALTER TABLE users DISABLE ROW LEVEL SECURITY`);
+      await tx`DELETE FROM _tenant_migrations WHERE migration_name = '999_locked_tenant_rls.sql'`;
+      await tx`DELETE FROM control_plane.tenant_migrations
+               WHERE tenant_id = ${tenantId} AND migration_name = '999_locked_tenant_rls.sql'`;
+    });
+
+    const results = await runTenantMigrationFleet({ statuses: ['active'] });
+    const upgraded = results.find((result) => result.tenantId === tenantId);
+    expect(upgraded).toMatchObject({ ok: true });
+    expect(upgraded.applied).toContain('999_locked_tenant_rls.sql');
+
+    const [policy] = await operator`
+      SELECT c.relrowsecurity, c.relforcerowsecurity
+      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = ${schemaName} AND c.relname = 'users'
+    `;
+    expect(policy).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true });
   });
 
   it('is idempotent and validates migration checksums', async () => {
