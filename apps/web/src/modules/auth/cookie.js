@@ -18,7 +18,9 @@ export function buildCookie(name, value, opts = {}) {
     'SameSite=Lax',
   ];
   if (cookieSecure()) parts.push('Secure');
-  if (opts.maxAge != null) parts.push(`Max-Age=${opts.maxAge}`);
+  if (opts.maxAge !== null && opts.maxAge !== undefined) {
+    parts.push(`Max-Age=${opts.maxAge}`);
+  }
   return parts.join('; ');
 }
 
@@ -56,7 +58,7 @@ export function clearAuthCookies(response) {
  */
 export function getCookie(request, name) {
   const header = request.headers.get('cookie') || '';
-  const match = header.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  const match = header.match(new RegExp(`(?:^|;\s*)${name}=([^;]*)`));
   return match ? decodeURIComponent(match[1]) : null;
 }
 
