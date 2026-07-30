@@ -52,6 +52,7 @@ const STEP_ORDER = [
 const STEP_LABELS = {
   registered: 'Tenant registered',
   queued: 'Provisioning queued',
+  retrying: 'Provisioning retrying',
   starting: 'Worker started',
   schema_created: 'Isolated schema created',
   migrations_applied: 'Tenant migrations applied',
@@ -64,7 +65,7 @@ const STEP_LABELS = {
 
 function statusColor(status) {
   if (status === 'active' || status === 'completed') return 'green';
-  if (status === 'provisioning' || status === 'queued' || status === 'running') return 'blue';
+  if (['provisioning', 'queued', 'running', 'retrying'].includes(status)) return 'blue';
   if (status === 'failed') return 'red';
   if (status === 'suspended') return 'orange';
   return 'default';
@@ -79,6 +80,15 @@ function provisionPercent(step, status) {
 
 function formatDate(value) {
   return value ? new Date(value).toLocaleString() : '—';
+}
+
+function isProvisioningState(tenant) {
+  return (
+    tenant?.status === 'provisioning' ||
+    ['registered', 'queued', 'running', 'retrying'].includes(
+      tenant?.provisioning_job_status || tenant?.provisioningJobs?.[0]?.status,
+    )
+  );
 }
 
 export default function PlatformTenantsPage() {
@@ -99,10 +109,10 @@ export default function PlatformTenantsPage() {
       if (!quiet) setLoading(true);
       setError('');
       try {
-        const meRes = await fetch('/api/v1/platform/auth/me');
+        const meRes = await fetch('/api/v1/platform/auth/me', { cache: 'no-store' });
         if (meRes.status === 401) {
           router.replace('/platform/login');
-          return;
+          return false;
         }
         const meJson = await meRes.json();
         setMe(meJson.data?.user || null);
@@ -111,11 +121,13 @@ export default function PlatformTenantsPage() {
         const listJson = await listRes.json();
         if (!listRes.ok) {
           setError(listJson.errors?.[0]?.message || 'Failed to load tenants');
-          return;
+          return false;
         }
         setTenants(listJson.data || []);
+        return true;
       } catch {
         setError('Unable to reach the platform API');
+        return false;
       } finally {
         if (!quiet) setLoading(false);
       }
@@ -123,21 +135,66 @@ export default function PlatformTenantsPage() {
     [router],
   );
 
+  const loadDetail = useCallback(async (id, { quiet = false } = {}) => {
+    if (!id) return false;
+    if (!quiet) setDetailLoading(true);
+    try {
+      const res = await fetch(`/api/v1/platform/tenants/${id}`, { cache: 'no-store' });
+      const json = await res.json();
+      if (!res.ok) {
+        if (!quiet) {
+          message.error(json.errors?.[0]?.message || 'Unable to load tenant');
+          setSelected(null);
+        }
+        return false;
+      }
+      setSelected(json.data);
+      return true;
+    } catch {
+      if (!quiet) {
+        message.error('Unable to load tenant details');
+        setSelected(null);
+      }
+      return false;
+    } finally {
+      if (!quiet) setDetailLoading(false);
+    }
+  }, []);
+
+  const openDetail = useCallback(
+    async (id) => {
+      setSelected({ id });
+      await loadDetail(id);
+    },
+    [loadDetail],
+  );
+
   useEffect(() => {
     load();
   }, [load]);
 
-  const hasWorkInProgress = tenants.some(
-    (tenant) =>
-      tenant.status === 'provisioning' ||
-      ['queued', 'running'].includes(tenant.provisioning_job_status),
-  );
+  const hasWorkInProgress = tenants.some(isProvisioningState);
+  const selectedInProgress = isProvisioningState(selected);
+  const selectedId = selected?.id || null;
 
   useEffect(() => {
-    if (!hasWorkInProgress) return undefined;
-    const timer = setInterval(() => load({ quiet: true }), 4000);
+    if (!hasWorkInProgress && !selectedInProgress) return undefined;
+
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try {
+        await load({ quiet: true });
+        if (selectedId) await loadDetail(selectedId, { quiet: true });
+      } finally {
+        refreshing = false;
+      }
+    };
+
+    const timer = setInterval(refresh, 4000);
     return () => clearInterval(timer);
-  }, [hasWorkInProgress, load]);
+  }, [hasWorkInProgress, load, loadDetail, selectedId, selectedInProgress]);
 
   const stats = useMemo(
     () => ({
@@ -177,26 +234,6 @@ export default function PlatformTenantsPage() {
     }
   }
 
-  async function openDetail(id) {
-    setDetailLoading(true);
-    setSelected({ id });
-    try {
-      const res = await fetch(`/api/v1/platform/tenants/${id}`, { cache: 'no-store' });
-      const json = await res.json();
-      if (!res.ok) {
-        message.error(json.errors?.[0]?.message || 'Unable to load tenant');
-        setSelected(null);
-        return;
-      }
-      setSelected(json.data);
-    } catch {
-      message.error('Unable to load tenant details');
-      setSelected(null);
-    } finally {
-      setDetailLoading(false);
-    }
-  }
-
   async function retryTenant(id) {
     setRetryingId(id);
     try {
@@ -211,7 +248,7 @@ export default function PlatformTenantsPage() {
       }
       message.success('Provisioning retry queued');
       await load({ quiet: true });
-      await openDetail(id);
+      await loadDetail(id, { quiet: true });
     } catch {
       message.error('Unable to retry provisioning');
     } finally {
@@ -222,6 +259,11 @@ export default function PlatformTenantsPage() {
   async function onLogout() {
     await fetch('/api/v1/platform/auth/logout', { method: 'POST' });
     router.replace('/platform/login');
+  }
+
+  async function refreshAll() {
+    await load();
+    if (selectedId) await loadDetail(selectedId, { quiet: true });
   }
 
   const columns = [
@@ -253,13 +295,19 @@ export default function PlatformTenantsPage() {
         return (
           <Space direction="vertical" size={2} style={{ width: '100%' }}>
             <Space>
-              {['queued', 'running'].includes(jobStatus) ? <SyncOutlined spin /> : null}
+              {['queued', 'running', 'retrying'].includes(jobStatus) ? <SyncOutlined spin /> : null}
               <Text>{STEP_LABELS[step] || step.replaceAll('_', ' ')}</Text>
             </Space>
             <Progress
               percent={provisionPercent(step, jobStatus)}
               size="small"
-              status={jobStatus === 'failed' ? 'exception' : jobStatus === 'completed' ? 'success' : 'active'}
+              status={
+                jobStatus === 'failed'
+                  ? 'exception'
+                  : jobStatus === 'completed'
+                    ? 'success'
+                    : 'active'
+              }
               showInfo={false}
             />
           </Space>
@@ -319,7 +367,9 @@ export default function PlatformTenantsPage() {
           : index === activeStep
             ? latestJob?.status === 'failed'
               ? 'error'
-              : 'process'
+              : latestJob?.status === 'completed'
+                ? 'finish'
+                : 'process'
             : 'wait',
   }));
 
@@ -360,7 +410,7 @@ export default function PlatformTenantsPage() {
             </Text>
           </div>
           <Space>
-            <Button icon={<ReloadOutlined />} onClick={() => load()} loading={loading}>
+            <Button icon={<ReloadOutlined />} onClick={refreshAll} loading={loading}>
               Refresh
             </Button>
             <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
@@ -423,7 +473,7 @@ export default function PlatformTenantsPage() {
           style={{ marginBottom: 18 }}
         />
         <Form form={form} layout="vertical" onFinish={onCreate} requiredMark={false}>
-          <Form.Item label="Organization name" name="name" rules={[{ required: true }]}> 
+          <Form.Item label="Organization name" name="name" rules={[{ required: true }]}>
             <Input placeholder="Acme Developers" autoFocus />
           </Form.Item>
           <Form.Item
