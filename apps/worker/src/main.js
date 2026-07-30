@@ -2,7 +2,7 @@ import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import {
   provisionTenantSchema,
-  runControlPlaneMigrations,
+  isControlPlaneReady,
   createControlPlaneSql,
   createLogger,
   validateEnv,
@@ -12,10 +12,13 @@ import {
 const log = createLogger({ service: 'hippo-worker' });
 validateEnv(workerEnvSchema);
 
-const connection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
+if (!(await isControlPlaneReady())) {
+  throw new Error(
+    'Control plane is not ready. Run db:migrate:control and db:migrate:tenants with MIGRATION_DATABASE_URL before starting the worker.',
+  );
+}
 
-await runControlPlaneMigrations();
-log.info('Control plane migrations applied');
+const connection = new IORedis(process.env.REDIS_URL, { maxRetriesPerRequest: null });
 
 async function updateProvisioningJob(jobId, values) {
   if (!jobId) return;
@@ -48,13 +51,7 @@ const tenantProvisionWorker = new Worker(
   'tenant.provision',
   async (job) => {
     const { tenantId, schemaName, adminEmail, adminName, provisioningJobId } = job.data;
-    log.info('Provisioning tenant', {
-      tenantId,
-      schemaName,
-      provisioningJobId,
-      jobId: job.id,
-    });
-
+    log.info('Provisioning tenant', { tenantId, schemaName, provisioningJobId, jobId: job.id });
     await updateProvisioningJob(provisioningJobId, {
       status: 'running',
       currentStep: 'starting',
@@ -79,15 +76,14 @@ const tenantProvisionWorker = new Worker(
       log.info('Tenant provisioned', { ...result, provisioningJobId, jobId: job.id });
       return result;
     } catch (error) {
-      const message = String(error.message).slice(0, 2000);
+      const errorMessage = String(error.message).slice(0, 2000);
       log.error('Tenant provisioning failed', {
         tenantId,
         schemaName,
         provisioningJobId,
-        err: message,
+        err: errorMessage,
         jobId: job.id,
       });
-
       const sql = createControlPlaneSql();
       await sql`
         UPDATE tenants
@@ -98,11 +94,9 @@ const tenantProvisionWorker = new Worker(
         status: 'failed',
         currentStep: 'failed',
         errorCode: 'PROVISIONING_FAILED',
-        errorMessage: message,
+        errorMessage,
         finished: true,
       });
-      // Do not drop the schema. The operator retry path resumes the idempotent
-      // steps and preserves evidence needed to diagnose a failed migration.
       throw error;
     }
   },
