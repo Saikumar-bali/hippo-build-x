@@ -53,21 +53,6 @@ export const POST = withApiHandler(
       throw new AppError(ErrorCode.TENANT_NOT_FOUND, 'Tenant not found', 404);
     }
     const tenant = rows[0];
-    if (tenant.status !== TENANT_STATUS.FAILED) {
-      throw new AppError(
-        ErrorCode.INVALID_STATE_TRANSITION,
-        `Provisioning can be retried only for failed tenants; current status is ${tenant.status}`,
-        409,
-        { tenantId: tenant.id, currentStatus: tenant.status, requiredStatus: TENANT_STATUS.FAILED },
-      );
-    }
-
-    const previousJobs = await sql`
-      SELECT payload FROM provisioning_jobs
-      WHERE tenant_id = ${tenant.id}
-      ORDER BY created_at DESC LIMIT 1
-    `;
-    const payload = previousJobs[0]?.payload || {};
     const idempotencyKey =
       request.headers.get('idempotency-key') ||
       `tenant-retry:${tenant.id}:${crypto.randomUUID()}`;
@@ -87,7 +72,13 @@ export const POST = withApiHandler(
           409,
         );
       }
-      const queued = await enqueueRegisteredJob(tenant, existingJob);
+
+      const canDispatchExisting = [TENANT_STATUS.FAILED, TENANT_STATUS.PROVISIONING].includes(
+        tenant.status,
+      );
+      const queued = canDispatchExisting
+        ? await enqueueRegisteredJob(tenant, existingJob)
+        : { mode: 'existing' };
       const fresh = await loadRetryState(sql, tenant.id, existingJob.id);
       return successResponse(
         {
@@ -98,6 +89,22 @@ export const POST = withApiHandler(
         { idempotentReplay: true },
       );
     }
+
+    if (tenant.status !== TENANT_STATUS.FAILED) {
+      throw new AppError(
+        ErrorCode.INVALID_STATE_TRANSITION,
+        `Provisioning can be retried only for failed tenants; current status is ${tenant.status}`,
+        409,
+        { tenantId: tenant.id, currentStatus: tenant.status, requiredStatus: TENANT_STATUS.FAILED },
+      );
+    }
+
+    const previousJobs = await sql`
+      SELECT payload FROM provisioning_jobs
+      WHERE tenant_id = ${tenant.id}
+      ORDER BY created_at DESC LIMIT 1
+    `;
+    const payload = previousJobs[0]?.payload || {};
 
     const result = await sql.begin(async (tx) => {
       const [job] = await tx`
