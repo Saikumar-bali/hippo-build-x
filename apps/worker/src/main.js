@@ -8,6 +8,10 @@ import {
   validateEnv,
   workerEnvSchema,
 } from './deps.js';
+import {
+  getProvisioningAttemptState,
+  getProvisioningFailureTransition,
+} from './provisioning-attempt.js';
 
 const log = createLogger({ service: 'hippo-worker' });
 validateEnv(workerEnvSchema);
@@ -30,8 +34,12 @@ async function updateProvisioningJob(jobId, values) {
          error_code = $4,
          error_message = $5,
          started_at = CASE WHEN $6::boolean THEN COALESCE(started_at, NOW()) ELSE started_at END,
-         finished_at = CASE WHEN $7::boolean THEN NOW() ELSE finished_at END,
-         attempt_count = attempt_count + CASE WHEN $8::boolean THEN 1 ELSE 0 END,
+         finished_at = CASE
+           WHEN $7::boolean THEN NOW()
+           WHEN $8::boolean THEN NULL
+           ELSE finished_at
+         END,
+         attempt_count = attempt_count + CASE WHEN $9::boolean THEN 1 ELSE 0 END,
          updated_at = NOW()
      WHERE id = $1`,
     [
@@ -42,6 +50,7 @@ async function updateProvisioningJob(jobId, values) {
       values.errorMessage || null,
       Boolean(values.started),
       Boolean(values.finished),
+      Boolean(values.clearFinished),
       Boolean(values.incrementAttempt),
     ],
   );
@@ -51,11 +60,30 @@ const tenantProvisionWorker = new Worker(
   'tenant.provision',
   async (job) => {
     const { tenantId, schemaName, adminEmail, adminName, provisioningJobId } = job.data;
-    log.info('Provisioning tenant', { tenantId, schemaName, provisioningJobId, jobId: job.id });
+    const attempt = getProvisioningAttemptState(job);
+    const sql = createControlPlaneSql();
+
+    log.info('Provisioning tenant', {
+      tenantId,
+      schemaName,
+      provisioningJobId,
+      jobId: job.id,
+      attempt: attempt.attemptNumber,
+      configuredAttempts: attempt.configuredAttempts,
+    });
+
+    await sql`
+      UPDATE tenants
+      SET status = 'provisioning',
+          data_location_status = ${attempt.attemptNumber > 1 ? 'retrying' : 'provisioning'},
+          updated_at = NOW()
+      WHERE id = ${tenantId} AND status <> 'active'
+    `;
     await updateProvisioningJob(provisioningJobId, {
       status: 'running',
       currentStep: 'starting',
       started: true,
+      clearFinished: true,
       incrementAttempt: true,
     });
 
@@ -77,25 +105,33 @@ const tenantProvisionWorker = new Worker(
       return result;
     } catch (error) {
       const errorMessage = String(error.message).slice(0, 2000);
+      const failure = getProvisioningFailureTransition(job, errorMessage);
+
       log.error('Tenant provisioning failed', {
         tenantId,
         schemaName,
         provisioningJobId,
         err: errorMessage,
         jobId: job.id,
+        attempt: failure.attemptNumber,
+        configuredAttempts: failure.configuredAttempts,
+        terminal: failure.isFinalAttempt,
       });
-      const sql = createControlPlaneSql();
+
       await sql`
         UPDATE tenants
-        SET status = 'failed', data_location_status = 'attention_required', updated_at = NOW()
+        SET status = ${failure.tenantStatus},
+            data_location_status = ${failure.dataLocationStatus},
+            updated_at = NOW()
         WHERE id = ${tenantId}
       `;
       await updateProvisioningJob(provisioningJobId, {
-        status: 'failed',
-        currentStep: 'failed',
-        errorCode: 'PROVISIONING_FAILED',
-        errorMessage,
-        finished: true,
+        status: failure.jobStatus,
+        currentStep: failure.currentStep,
+        errorCode: failure.errorCode,
+        errorMessage: failure.errorMessage,
+        finished: failure.finished,
+        clearFinished: failure.clearFinished,
       });
       throw error;
     }
