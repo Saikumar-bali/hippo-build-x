@@ -3,14 +3,11 @@
  * Supports multiple AI providers through a unified interface.
  */
 
-/**
- * OpenAI adapter stub — implement with OpenAI SDK.
- */
+/** OpenAI adapter stub — implement with OpenAI SDK. */
 export class OpenAiProvider {
   name = 'openai';
 
-  async generate(prompt) {
-    // Implementation: call OpenAI API
+  async generate(_prompt) {
     return {
       content: '',
       tokenUsage: { prompt: 0, completion: 0, total: 0 },
