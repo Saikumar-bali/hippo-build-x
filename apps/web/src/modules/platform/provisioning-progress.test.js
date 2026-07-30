@@ -14,25 +14,46 @@ describe('provisioning progress reporting', () => {
         updateProgress,
         onProgressError,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ durableRecorded: true, progressRecorded: false });
 
     expect(updateDurableState).toHaveBeenCalledWith('active');
     expect(updateProgress).toHaveBeenCalledWith('active');
     expect(onProgressError).toHaveBeenCalledWith(expect.any(Error), 'active');
   });
 
-  it('still rejects when the durable provisioning state cannot be recorded', async () => {
+  it('keeps successful provisioning independent from a durable reporting failure', async () => {
     const updateDurableState = vi.fn().mockRejectedValue(new Error('database unavailable'));
-    const updateProgress = vi.fn();
+    const updateProgress = vi.fn().mockResolvedValue(undefined);
+    const onDurableError = vi.fn();
 
     await expect(
       reportProvisioningStep({
-        currentStep: 'migrations_applied',
+        currentStep: 'active',
         updateDurableState,
         updateProgress,
+        onDurableError,
       }),
-    ).rejects.toThrow('database unavailable');
+    ).resolves.toEqual({ durableRecorded: false, progressRecorded: true });
 
-    expect(updateProgress).not.toHaveBeenCalled();
+    expect(onDurableError).toHaveBeenCalledWith(expect.any(Error), 'active');
+    expect(updateProgress).toHaveBeenCalledWith('active');
+  });
+
+  it('contains simultaneous durable and telemetry failures', async () => {
+    const onDurableError = vi.fn();
+    const onProgressError = vi.fn();
+
+    await expect(
+      reportProvisioningStep({
+        currentStep: 'defaults_seeded',
+        updateDurableState: vi.fn().mockRejectedValue(new Error('database unavailable')),
+        updateProgress: vi.fn().mockRejectedValue(new Error('redis unavailable')),
+        onDurableError,
+        onProgressError,
+      }),
+    ).resolves.toEqual({ durableRecorded: false, progressRecorded: false });
+
+    expect(onDurableError).toHaveBeenCalledTimes(1);
+    expect(onProgressError).toHaveBeenCalledTimes(1);
   });
 });
