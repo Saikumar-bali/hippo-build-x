@@ -1,11 +1,11 @@
 -- Defense in depth for PRD §5. Schema routing is the primary boundary; forced
--- RLS prevents a schema-qualified query from reading or writing another tenant
--- when the runtime database role does not have BYPASSRLS.
+-- RLS prevents schema-qualified reads and writes across tenant schemas.
 
 DO $$
 DECLARE
   target RECORD;
   qualified TEXT;
+  expected_tenant UUID := current_setting('app.tenant_id')::uuid;
 BEGIN
   FOR target IN
     SELECT t.table_schema, t.table_name
@@ -26,10 +26,12 @@ BEGIN
     EXECUTE format('DROP POLICY IF EXISTS tenant_isolation ON %s', qualified);
     EXECUTE format(
       'CREATE POLICY tenant_isolation ON %s USING '
-      || '(tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) '
+      || '(tenant_id = %L::uuid AND tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid) '
       || 'WITH CHECK '
-      || '(tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
-      qualified
+      || '(tenant_id = %L::uuid AND tenant_id = NULLIF(current_setting(''app.tenant_id'', true), '''')::uuid)',
+      qualified,
+      expected_tenant,
+      expected_tenant
     );
   END LOOP;
 END $$;
