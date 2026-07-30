@@ -3,9 +3,9 @@ import {
   runControlPlaneMigrations,
   provisionTenantSchema,
   rollbackTenantProvisioning,
-  toSchemaName,
+  toTenantSchemaName,
   closeDb,
-  getSql,
+  createControlPlaneSql,
   createTenantSql,
   TENANT_STATUS,
 } from '@hippo/db';
@@ -14,25 +14,25 @@ import {
   rotateRefreshToken,
   loadUserAuthz,
 } from './session-service.js';
+import { verifyAccessToken } from '@/lib/auth.js';
 import { enforceNotAuditorWrite, enforcePermission, canAccessRecord, Permission } from '@hippo/rbac';
 
 const hasDb = Boolean(process.env.DATABASE_URL);
 
-describe.skipIf(!hasDb)('Phase 1 auth + RBAC', () => {
+describe.skipIf(!hasDb)('Phase 1 auth + locked tenant routing', () => {
   const stamp = Date.now();
+  const tenantId = crypto.randomUUID();
   const slug = `p1-${stamp}`;
-  const schemaName = toSchemaName(slug);
-  let tenantId;
+  const schemaName = toTenantSchemaName(tenantId);
 
   beforeAll(async () => {
     await runControlPlaneMigrations();
-    const sql = getSql();
-    const [tenant] = await sql`
-      INSERT INTO tenants (name, slug, schema_name, status)
-      VALUES (${'P1 Tenant'}, ${slug}, ${schemaName}, ${TENANT_STATUS.PROVISIONING})
-      RETURNING id
+    const cp = createControlPlaneSql();
+    await cp`
+      INSERT INTO tenants (id, name, slug, schema_name, status, isolation_mode)
+      VALUES (${tenantId}, 'P1 Tenant', ${slug}, ${schemaName},
+              ${TENANT_STATUS.PROVISIONING}, 'shared_schema')
     `;
-    tenantId = tenant.id;
     await provisionTenantSchema(tenantId, schemaName, {
       adminEmail: `admin@${slug}.test`,
       adminName: 'Admin',
@@ -42,57 +42,46 @@ describe.skipIf(!hasDb)('Phase 1 auth + RBAC', () => {
 
   afterAll(async () => {
     try {
-      if (tenantId) {
-        await rollbackTenantProvisioning(schemaName, tenantId);
-        await getSql()`DELETE FROM tenants WHERE id = ${tenantId}`;
-      }
+      await rollbackTenantProvisioning(schemaName, tenantId);
+      const cp = createControlPlaneSql();
+      await cp`DELETE FROM tenant_channels WHERE tenant_id = ${tenantId}`;
+      await cp`DELETE FROM tenants WHERE id = ${tenantId}`;
     } finally {
       await closeDb();
     }
   });
 
-  it('rejects invalid password without leaking existence', async () => {
-    await expect(
-      loginWithPassword({
-        slug,
-        email: `admin@${slug}.test`,
-        password: 'wrong-password',
-      }),
-    ).rejects.toMatchObject({ statusCode: 401, message: 'Invalid credentials' });
-
-    await expect(
-      loginWithPassword({
-        slug,
-        email: 'nobody@example.com',
-        password: 'wrong-password',
-      }),
-    ).rejects.toMatchObject({ statusCode: 401, message: 'Invalid credentials' });
+  it('rejects invalid passwords without leaking account existence', async () => {
+    for (const email of [`admin@${slug}.test`, 'nobody@example.com']) {
+      await expect(loginWithPassword({ slug, email, password: 'wrong-password' })).rejects.toMatchObject({
+        statusCode: 401,
+        message: 'Invalid credentials',
+      });
+    }
   });
 
-  it('logs in and rotates refresh; reuse is rejected', async () => {
+  it('issues identity-only tokens and rejects refresh reuse', async () => {
     const session = await loginWithPassword({
       slug,
       email: `admin@${slug}.test`,
       password: 'Admin@12345',
     });
-    expect(session.accessToken).toBeTruthy();
-    expect(session.refreshToken).toContain(schemaName);
+    const payload = await verifyAccessToken(session.accessToken);
+    expect(payload).toMatchObject({ sub: session.user.id, tenantId, scope: 'tenant' });
+    expect(payload.schemaName).toBeUndefined();
+    expect(payload.permissions).toBeUndefined();
+    expect(session.refreshToken).not.toContain(schemaName);
 
     const rotated = await rotateRefreshToken(session.refreshToken);
-    expect(rotated.accessToken).toBeTruthy();
     expect(rotated.refreshToken).not.toBe(session.refreshToken);
-
-    await expect(rotateRefreshToken(session.refreshToken)).rejects.toMatchObject({
-      statusCode: 401,
-    });
+    await expect(rotateRefreshToken(session.refreshToken)).rejects.toMatchObject({ statusCode: 401 });
   });
 
-  it('denies suspended users', async () => {
-    const sql = createTenantSql(schemaName);
-    await sql.unsafe(
-      `UPDATE users SET status = 'suspended' WHERE email = $1`,
-      [`admin@${slug}.test`],
-    );
+  it('denies suspended users immediately', async () => {
+    const sql = createTenantSql(schemaName, tenantId);
+    await sql.unsafe(`UPDATE users SET status = 'suspended' WHERE email = $1`, [
+      `admin@${slug}.test`,
+    ]);
     await expect(
       loginWithPassword({
         slug,
@@ -100,15 +89,14 @@ describe.skipIf(!hasDb)('Phase 1 auth + RBAC', () => {
         password: 'Admin@12345',
       }),
     ).rejects.toMatchObject({ statusCode: 401 });
-    await sql.unsafe(
-      `UPDATE users SET status = 'active' WHERE email = $1`,
-      [`admin@${slug}.test`],
-    );
+    await sql.unsafe(`UPDATE users SET status = 'active' WHERE email = $1`, [
+      `admin@${slug}.test`,
+    ]);
   });
 
-  it('auditor cannot write', async () => {
-    const sql = createTenantSql(schemaName);
-    const roles = await sql.unsafe(`SELECT id FROM roles WHERE name = 'Auditor'`);
+  it('keeps auditor writes denied', async () => {
+    const sql = createTenantSql(schemaName, tenantId);
+    const [role] = await sql.unsafe(`SELECT id FROM roles WHERE name = 'Auditor'`);
     const [auditor] = await sql.unsafe(
       `INSERT INTO users (tenant_id, email, name, password_hash, status)
        VALUES ($1, $2, 'Auditor', '$pending$', 'active') RETURNING id`,
@@ -116,15 +104,12 @@ describe.skipIf(!hasDb)('Phase 1 auth + RBAC', () => {
     );
     await sql.unsafe(
       `INSERT INTO user_roles (tenant_id, user_id, role_id) VALUES ($1, $2, $3)`,
-      [tenantId, auditor.id, roles[0].id],
+      [tenantId, auditor.id, role.id],
     );
 
-    const authz = await loadUserAuthz(schemaName, auditor.id);
+    const authz = await loadUserAuthz(schemaName, auditor.id, tenantId);
     expect(() =>
-      enforceNotAuditorWrite(
-        { roles: authz.roles, permissions: authz.permissions },
-        'POST',
-      ),
+      enforceNotAuditorWrite({ roles: authz.roles, permissions: authz.permissions }, 'POST'),
     ).toThrow();
     enforcePermission(
       { permissions: authz.permissions, roles: authz.roles },
@@ -132,12 +117,11 @@ describe.skipIf(!hasDb)('Phase 1 auth + RBAC', () => {
     );
   });
 
-  it('site engineer is scoped to assigned project/location', async () => {
-    const sql = createTenantSql(schemaName);
-    const projects = await sql.unsafe(`SELECT id FROM projects WHERE code = 'GVR'`);
-    const locations = await sql.unsafe(`SELECT id FROM locations WHERE code = 'TOWER-A'`);
-    const roles = await sql.unsafe(`SELECT id FROM roles WHERE name = 'Site Engineer'`);
-
+  it('enforces project and location scopes', async () => {
+    const sql = createTenantSql(schemaName, tenantId);
+    const [project] = await sql.unsafe(`SELECT id FROM projects WHERE code = 'GVR'`);
+    const [location] = await sql.unsafe(`SELECT id FROM locations WHERE code = 'TOWER-A'`);
+    const [role] = await sql.unsafe(`SELECT id FROM roles WHERE name = 'Site Engineer'`);
     const [meera] = await sql.unsafe(
       `INSERT INTO users (tenant_id, email, name, password_hash, status)
        VALUES ($1, $2, 'Meera', '$pending$', 'active') RETURNING id`,
@@ -146,22 +130,20 @@ describe.skipIf(!hasDb)('Phase 1 auth + RBAC', () => {
     await sql.unsafe(
       `INSERT INTO user_roles (tenant_id, user_id, role_id, project_id, location_id)
        VALUES ($1, $2, $3, $4, $5)`,
-      [tenantId, meera.id, roles[0].id, projects[0].id, locations[0].id],
+      [tenantId, meera.id, role.id, project.id, location.id],
     );
 
-    const authz = await loadUserAuthz(schemaName, meera.id);
-    expect(authz.projectIds).toContain(projects[0].id);
-    expect(authz.locationIds).toContain(locations[0].id);
+    const authz = await loadUserAuthz(schemaName, meera.id, tenantId);
     expect(
       canAccessRecord(
         { roles: authz.roles, projectIds: authz.projectIds, locationIds: authz.locationIds },
-        { project_id: projects[0].id, location_id: locations[0].id },
+        { project_id: project.id, location_id: location.id },
       ),
     ).toBe(true);
     expect(
       canAccessRecord(
         { roles: authz.roles, projectIds: authz.projectIds, locationIds: authz.locationIds },
-        { project_id: '00000000-0000-0000-0000-000000000099', location_id: locations[0].id },
+        { project_id: '00000000-0000-0000-0000-000000000099', location_id: location.id },
       ),
     ).toBe(false);
   });
