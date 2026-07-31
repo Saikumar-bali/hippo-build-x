@@ -1,9 +1,28 @@
 ALTER TABLE tenants
   ADD COLUMN IF NOT EXISTS storage_prefix TEXT;
 
+CREATE OR REPLACE FUNCTION control_plane.set_tenant_storage_prefix()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.storage_prefix IS NULL OR btrim(NEW.storage_prefix) = '' THEN
+    NEW.storage_prefix := 'tenants/' || NEW.id::text || '/';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tenants_storage_prefix_trg ON control_plane.tenants;
+CREATE TRIGGER tenants_storage_prefix_trg
+BEFORE INSERT OR UPDATE OF id, storage_prefix
+ON control_plane.tenants
+FOR EACH ROW
+EXECUTE FUNCTION control_plane.set_tenant_storage_prefix();
+
 UPDATE tenants
 SET storage_prefix = 'tenants/' || id::text || '/'
-WHERE storage_prefix IS NULL;
+WHERE storage_prefix IS NULL OR btrim(storage_prefix) = '';
 
 ALTER TABLE tenants
   ALTER COLUMN storage_prefix SET NOT NULL;
