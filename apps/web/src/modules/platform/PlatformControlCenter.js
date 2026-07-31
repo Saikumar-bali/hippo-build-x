@@ -248,6 +248,7 @@ function sentence(value) {
 function subscriptionColor(status) {
   if (status === 'active') return 'green';
   if (status === 'trial') return 'blue';
+  if (status === 'scheduled') return 'purple';
   if (status === 'paused') return 'orange';
   if (status === 'cancelled' || status === 'expired') return 'default';
   return 'default';
@@ -256,6 +257,7 @@ function subscriptionColor(status) {
 function subscriptionLabel(status) {
   return (
     {
+      scheduled: 'Scheduled',
       active: 'Active',
       trial: 'Trial',
       paused: 'Paused',
@@ -422,6 +424,22 @@ export default function PlatformControlCenter() {
   const [subscriptionForm] = Form.useForm();
   const [flagForm] = Form.useForm();
   const [actionForm] = Form.useForm();
+
+  const isSuperAdmin = me?.role === 'super_admin';
+  const roleLabel =
+    me?.role === 'super_admin'
+      ? 'Super administrator'
+      : me?.role === 'support'
+        ? 'Support operator'
+        : sentence(me?.role || 'platform user');
+
+  function requireWriteAccess() {
+    if (isSuperAdmin) return true;
+    message.warning(
+      'Your platform role is read-only. A super administrator must perform this action.',
+    );
+    return false;
+  }
 
   const load = useCallback(
     async ({ quiet = false, page = jobPage } = {}) => {
@@ -638,6 +656,7 @@ export default function PlatformControlCenter() {
   }
 
   async function createTenant(values) {
+    if (!requireWriteAccess()) return;
     setSaving(true);
     try {
       const result = await apiRequest('/api/v1/platform/tenants', {
@@ -660,6 +679,7 @@ export default function PlatformControlCenter() {
   }
 
   async function retryTenant(id) {
+    if (!requireWriteAccess()) return;
     setRetryingId(id);
     try {
       await apiRequest(`/api/v1/platform/tenants/${id}/retry-provisioning`, {
@@ -677,6 +697,7 @@ export default function PlatformControlCenter() {
   }
 
   function openPlanModal(plan = null) {
+    if (!requireWriteAccess()) return;
     setPlanModal({ open: true, plan });
     planForm.setFieldsValue(
       plan
@@ -692,7 +713,6 @@ export default function PlatformControlCenter() {
             displayOrder: plan.display_order || 0,
             users: plan.entitlements?.users ?? 0,
             projects: plan.entitlements?.projects ?? 0,
-            storageGb: plan.entitlements?.storageGb ?? 0,
             modules: plan.entitlements?.modules || [],
           }
         : {
@@ -702,13 +722,13 @@ export default function PlatformControlCenter() {
             displayOrder: (data.plans.length + 1) * 10,
             users: 25,
             projects: 3,
-            storageGb: 25,
             modules: ['projects', 'crm', 'progress', 'notifications'],
           },
     );
   }
 
   async function savePlan(values) {
+    if (!requireWriteAccess()) return;
     setSaving(true);
     const existing = planModal.plan;
     try {
@@ -725,7 +745,6 @@ export default function PlatformControlCenter() {
         entitlements: {
           users: values.users,
           projects: values.projects,
-          storageGb: values.storageGb,
           modules: values.modules || [],
         },
       };
@@ -748,6 +767,7 @@ export default function PlatformControlCenter() {
   }
 
   function openSubscriptionModal(subscription = null, tenantId = null) {
+    if (!requireWriteAccess()) return;
     setSubscriptionModal({ open: true, subscription });
     subscriptionForm.setFieldsValue(
       subscription
@@ -768,6 +788,7 @@ export default function PlatformControlCenter() {
   }
 
   async function saveSubscription(values) {
+    if (!requireWriteAccess()) return;
     const existing = subscriptionModal.subscription;
     setSaving(true);
     try {
@@ -801,6 +822,7 @@ export default function PlatformControlCenter() {
   }
 
   function openFlagModal(flag = null, tenantId = null) {
+    if (!requireWriteAccess()) return;
     setFlagModal({ open: true, flag, tenantId });
     flagForm.setFieldsValue(
       flag
@@ -820,6 +842,7 @@ export default function PlatformControlCenter() {
   }
 
   async function saveFlag(values) {
+    if (!requireWriteAccess()) return;
     setSaving(true);
     try {
       await apiRequest('/api/v1/platform/feature-flags', {
@@ -843,6 +866,7 @@ export default function PlatformControlCenter() {
   }
 
   async function deleteFlag(flag) {
+    if (!requireWriteAccess()) return;
     setSaving(true);
     try {
       await apiRequest(`/api/v1/platform/feature-flags?id=${flag.id}`, { method: 'DELETE' });
@@ -856,6 +880,7 @@ export default function PlatformControlCenter() {
   }
 
   function openTenantAction(type, tenant) {
+    if (!requireWriteAccess()) return;
     setTenantAction({ open: true, type, tenant });
     actionForm.resetFields();
     actionForm.setFieldsValue({
@@ -865,6 +890,7 @@ export default function PlatformControlCenter() {
   }
 
   async function exportTenant(tenant) {
+    if (!requireWriteAccess()) return;
     setSaving(true);
     try {
       const response = await fetch(`/api/v1/platform/tenants/${tenant.id}/export`, {
@@ -896,6 +922,7 @@ export default function PlatformControlCenter() {
   }
 
   async function submitTenantAction(values) {
+    if (!requireWriteAccess()) return;
     const { type, tenant } = tenantAction;
     if (!tenant) return;
     setSaving(true);
@@ -920,11 +947,16 @@ export default function PlatformControlCenter() {
           },
         );
         message.success(`${result.revokedSessions || 0} active sessions revoked`);
-      } else if (type === 'offboard' || type === 'purge') {
+      } else if (type === 'offboard' || type === 'purge' || type === 'release_hold') {
         const result = await apiRequest(`/api/v1/platform/tenants/${tenant.id}/delete`, {
           method: 'POST',
           body: JSON.stringify({
-            mode: type === 'offboard' ? 'soft_delete' : 'purge',
+            mode:
+              type === 'offboard'
+                ? 'soft_delete'
+                : type === 'purge'
+                  ? 'purge'
+                  : 'release_hold',
             reason: values.reason,
             legalHold: Boolean(values.legalHold),
             retentionDays: values.retentionDays,
@@ -934,7 +966,9 @@ export default function PlatformControlCenter() {
         message.success(
           type === 'offboard'
             ? 'Company offboarded into the recovery window'
-            : `Permanent purge scheduled for ${formatDate(result.scheduled_for)}`,
+            : type === 'release_hold'
+              ? 'Legal hold released; permanent purge can now be scheduled'
+              : `Permanent purge scheduled for ${formatDate(result.scheduled_for)}`,
         );
         if (type === 'offboard') setSelectedId(null);
       }
@@ -967,17 +1001,59 @@ export default function PlatformControlCenter() {
   }
 
   function companyActionItems(tenant) {
-    const items = [
-      { key: 'view', icon: <EyeOutlined />, label: 'Open company details' },
-      { key: 'plan', icon: <CreditCardOutlined />, label: 'Assign or change plan' },
-      { type: 'divider' },
+    const viewItem = { key: 'view', icon: <EyeOutlined />, label: 'Open company details' };
+    if (!isSuperAdmin) {
+      return {
+        items: [viewItem],
+        onClick: ({ key, domEvent }) => {
+          domEvent?.stopPropagation();
+          if (key === 'view') setSelectedId(tenant.id);
+        },
+      };
+    }
+
+    const ready = ['active', 'suspended'].includes(tenant.status);
+    const lifecycleItem =
       tenant.status === 'suspended'
         ? { key: 'resume', icon: <PlayCircleOutlined />, label: 'Resume company' }
-        : { key: 'suspend', icon: <PauseCircleOutlined />, label: 'Suspend company' },
-      { key: 'revoke', icon: <KeyOutlined />, label: 'Revoke all sessions' },
-      { key: 'export', icon: <ExportOutlined />, label: 'Export company data' },
+        : tenant.status === 'active'
+          ? { key: 'suspend', icon: <PauseCircleOutlined />, label: 'Suspend company' }
+          : {
+              key: 'lifecycle_unavailable',
+              icon: <PauseCircleOutlined />,
+              label: 'Lifecycle actions unavailable during setup',
+              disabled: true,
+            };
+    const items = [
+      viewItem,
+      {
+        key: 'plan',
+        icon: <CreditCardOutlined />,
+        label: 'Assign or change plan',
+        disabled: !ready,
+      },
       { type: 'divider' },
-      { key: 'offboard', icon: <DeleteOutlined />, label: 'Offboard company', danger: true },
+      lifecycleItem,
+      {
+        key: 'revoke',
+        icon: <KeyOutlined />,
+        label: 'Revoke all sessions',
+        disabled: !ready,
+      },
+      {
+        key: 'export',
+        icon: <ExportOutlined />,
+        label: 'Export company data',
+        disabled: !ready,
+      },
+      { type: 'divider' },
+      {
+        key: 'offboard',
+        icon: <DeleteOutlined />,
+        label: tenant.status === 'suspended' ? 'Offboard company' : 'Suspend before offboarding',
+        disabled: tenant.status !== 'suspended',
+        danger: true,
+      },
     ];
     return {
       items,
@@ -985,7 +1061,7 @@ export default function PlatformControlCenter() {
         domEvent?.stopPropagation();
         if (key === 'view') setSelectedId(tenant.id);
         if (key === 'plan') openSubscriptionModal(null, tenant.id);
-        if (key === 'suspend' || key === 'resume' || key === 'revoke' || key === 'offboard') {
+        if (['suspend', 'resume', 'revoke', 'offboard'].includes(key)) {
           openTenantAction(key, tenant);
         }
         if (key === 'export') exportTenant(tenant);
@@ -1086,9 +1162,17 @@ export default function PlatformControlCenter() {
     {
       title: '',
       width: 60,
-      render: (_, item) => (
-        <Button type="text" icon={<EditOutlined />} onClick={() => openSubscriptionModal(item)} />
-      ),
+      render: (_, item) =>
+        isSuperAdmin ? (
+          <Button
+            type="text"
+            icon={<EditOutlined />}
+            aria-label={`Edit subscription for ${item.tenant_name}`}
+            onClick={() => openSubscriptionModal(item)}
+          />
+        ) : (
+          <Text type="secondary">Read only</Text>
+        ),
     },
   ];
 
@@ -1122,25 +1206,26 @@ export default function PlatformControlCenter() {
     {
       title: '',
       width: 96,
-      render: (_, flag) => (
-        <Space size={2}>
-          <Button type="text" icon={<EditOutlined />} onClick={() => openFlagModal(flag)} />
-          <Button
-            type="text"
-            danger
-            icon={<DeleteOutlined />}
-            onClick={() =>
-              Modal.confirm({
-                title: 'Remove this feature control?',
-                content: 'The company-owned setting and plan entitlement will apply again immediately.',
-                okText: 'Remove control',
-                okButtonProps: { danger: true },
-                onOk: () => deleteFlag(flag),
-              })
-            }
-          />
-        </Space>
-      ),
+      render: (_, flag) =>
+        isSuperAdmin ? (
+          <Space size={2}>
+            <Button type="text" icon={<EditOutlined />} onClick={() => openFlagModal(flag)} />
+            <Button
+              type="text"
+              danger
+              icon={<DeleteOutlined />}
+              onClick={() =>
+                Modal.confirm({
+                  title: 'Remove this feature control?',
+                  content: 'The company-owned setting and plan entitlement will apply again immediately.',
+                  okText: 'Remove control',
+                  okButtonProps: { danger: true },
+                  onOk: () => deleteFlag(flag),
+                })
+              }
+            />
+          </Space>
+        ) : null,
     },
   ];
 
@@ -1206,24 +1291,25 @@ export default function PlatformControlCenter() {
     { title: 'Reason', dataIndex: 'reason', ellipsis: true },
     {
       title: '',
-      width: 120,
-      render: (_, item) =>
-        item.mode === 'soft_delete' && item.status === 'completed' && !item.legal_hold ? (
-          <Button
-            size="small"
-            danger
-            onClick={() =>
-              openTenantAction('purge', {
-                id: item.tenant_id,
-                name: item.tenant_name,
-                slug: item.tenant_slug,
-                status: 'suspended',
-              })
-            }
-          >
+      width: 160,
+      render: (_, item) => {
+        if (!isSuperAdmin || item.mode !== 'soft_delete' || item.status !== 'completed') return null;
+        const tenant = {
+          id: item.tenant_id,
+          name: item.tenant_name,
+          slug: item.tenant_slug,
+          status: 'suspended',
+        };
+        return item.legal_hold ? (
+          <Button size="small" onClick={() => openTenantAction('release_hold', tenant)}>
+            Release legal hold
+          </Button>
+        ) : (
+          <Button size="small" danger onClick={() => openTenantAction('purge', tenant)}>
             Schedule purge
           </Button>
-        ) : null,
+        );
+      },
     },
   ];
 
@@ -1526,7 +1612,9 @@ export default function PlatformControlCenter() {
                   </div>
                   <Space>
                     <Tag color={plan.status === 'active' ? 'green' : 'default'}>{sentence(plan.status)}</Tag>
-                    <Button type="text" icon={<EditOutlined />} onClick={() => openPlanModal(plan)} />
+                    {isSuperAdmin ? (
+                      <Button type="text" icon={<EditOutlined />} onClick={() => openPlanModal(plan)} />
+                    ) : null}
                   </Space>
                 </div>
                 <div className={styles.planPrice}>
@@ -1539,7 +1627,6 @@ export default function PlatformControlCenter() {
                 <div className={styles.entitlementList}>
                   <Tag>{entitlements.users === -1 ? 'Unlimited' : entitlements.users || 0} users</Tag>
                   <Tag>{entitlements.projects === -1 ? 'Unlimited' : entitlements.projects || 0} projects</Tag>
-                  <Tag>{entitlements.storageGb || 0} GB storage</Tag>
                   <Tag>{Array.isArray(entitlements.modules) ? entitlements.modules.length : 0} modules</Tag>
                 </div>
                 <div className={styles.planFooter}>
@@ -1556,9 +1643,11 @@ export default function PlatformControlCenter() {
           className={`${styles.card} ${styles.tableCard}`}
           title="Subscriptions"
           extra={
-            <Button type="primary" icon={<PlusOutlined />} onClick={() => openSubscriptionModal()}>
-              Assign plan
-            </Button>
+            isSuperAdmin ? (
+              <Button type="primary" icon={<PlusOutlined />} onClick={() => openSubscriptionModal()}>
+                Assign plan
+              </Button>
+            ) : null
           }
         >
           <Table
@@ -1841,6 +1930,7 @@ export default function PlatformControlCenter() {
   }
 
   function primaryAction() {
+    if (!isSuperAdmin) return null;
     if (activeView === 'overview' || activeView === 'organizations') {
       return (
         <Button className={styles.primaryAction} type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
@@ -1905,9 +1995,15 @@ export default function PlatformControlCenter() {
       okText: 'Offboard company',
       danger: true,
     },
+    release_hold: {
+      title: `Release the legal hold for ${tenantAction.tenant?.name || 'company'}?`,
+      description: 'This removes the compliance hold. The company remains soft-deleted until a separate permanent purge is scheduled.',
+      okText: 'Release legal hold',
+      danger: true,
+    },
     purge: {
       title: `Schedule permanent purge for ${tenantAction.tenant?.name || 'company'}?`,
-      description: 'After the retention period, the worker permanently destroys the tenant data schema. Audit evidence remains.',
+      description: 'After the retention period, the worker permanently destroys tenant database and object-storage data. Audit evidence remains.',
       okText: 'Schedule purge',
       danger: true,
     },
@@ -1916,7 +2012,11 @@ export default function PlatformControlCenter() {
   const selectedActionMenu = selected ? companyActionItems(selected) : { items: [] };
   const profileMenu = {
     items: [
-      { key: 'email', label: me?.email || 'Platform administrator', disabled: true },
+      {
+        key: 'identity',
+        label: `${me?.email || 'Platform user'} · ${roleLabel}`,
+        disabled: true,
+      },
       { type: 'divider' },
       { key: 'logout', icon: <LogoutOutlined />, label: 'Sign out' },
     ],
@@ -1987,8 +2087,8 @@ export default function PlatformControlCenter() {
               <Button className={styles.profileButton}>
                 <Avatar size={34} icon={<UserOutlined />} />
                 <span className={styles.profileMeta}>
-                  <span className={styles.profileName}>{me?.name || 'Platform Administrator'}</span>
-                  <span className={styles.profileRole}>Super administrator</span>
+                  <span className={styles.profileName}>{me?.name || 'Platform user'}</span>
+                  <span className={styles.profileRole}>{roleLabel}</span>
                 </span>
                 <DownOutlined style={{ fontSize: 10, color: '#64748b' }} />
               </Button>
@@ -2013,6 +2113,15 @@ export default function PlatformControlCenter() {
           </div>
 
           {error ? <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} /> : null}
+          {!isSuperAdmin ? (
+            <Alert
+              type="info"
+              showIcon
+              message="Read-only platform access"
+              description="You can inspect organizations, plans, operations and audit evidence. A super administrator must perform commercial, lifecycle or destructive changes."
+              style={{ marginBottom: 16 }}
+            />
+          ) : null}
           {renderView()}
         </Content>
       </Layout>
@@ -2182,9 +2291,6 @@ export default function PlatformControlCenter() {
             <Form.Item label="Project limit" name="projects" extra="Use -1 for unlimited">
               <InputNumber min={-1} style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item label="Storage (GB)" name="storageGb">
-              <InputNumber min={0} style={{ width: '100%' }} />
-            </Form.Item>
             <Form.Item className={styles.formFull} label="Included modules" name="modules">
               <Select mode="multiple" options={[{ value: 'all', label: 'All modules' }, ...MODULE_OPTIONS]} placeholder="Select plan modules" />
             </Form.Item>
@@ -2218,6 +2324,7 @@ export default function PlatformControlCenter() {
           <div className={styles.formGrid}>
             <Form.Item label="Status" name="status" rules={[{ required: true }]}>
               <Select options={[
+                { value: 'scheduled', label: 'Scheduled — starts in the future' },
                 { value: 'trial', label: 'Trial' },
                 { value: 'active', label: 'Active' },
                 { value: 'paused', label: 'Paused' },
@@ -2306,7 +2413,17 @@ export default function PlatformControlCenter() {
         />
         <Form form={actionForm} layout="vertical" onFinish={submitTenantAction} requiredMark={false}>
           {tenantAction.type !== 'resume' ? (
-            <Form.Item label="Reason" name="reason" rules={[{ required: true, min: tenantAction.type === 'offboard' || tenantAction.type === 'purge' ? 10 : 5 }]}>
+            <Form.Item label="Reason" name="reason" rules={[
+              {
+                required: true,
+                min:
+                  tenantAction.type === 'offboard' ||
+                  tenantAction.type === 'purge' ||
+                  tenantAction.type === 'release_hold'
+                    ? 10
+                    : 5,
+              },
+            ]}>
               <Input.TextArea rows={3} placeholder="Why this action is required" />
             </Form.Item>
           ) : null}
@@ -2320,7 +2437,9 @@ export default function PlatformControlCenter() {
               <InputNumber min={1} max={365} style={{ width: '100%' }} />
             </Form.Item>
           ) : null}
-          {tenantAction.type === 'offboard' || tenantAction.type === 'purge' ? (
+          {tenantAction.type === 'offboard' ||
+          tenantAction.type === 'purge' ||
+          tenantAction.type === 'release_hold' ? (
             <Form.Item
               label={
                 <span>
@@ -2362,7 +2481,7 @@ export default function PlatformControlCenter() {
           ) : null
         }
         extra={
-          selected ? (
+          selected && isSuperAdmin ? (
             <Dropdown menu={selectedActionMenu} trigger={['click']}>
               <Button icon={<MoreOutlined />}>Actions</Button>
             </Dropdown>
@@ -2409,7 +2528,7 @@ export default function PlatformControlCenter() {
                                 : `${setupStepLabel(selectedLatestJob?.current_step)}. Progress refreshes automatically.`
                         }
                         action={
-                          selected.status === 'failed' ? (
+                          selected.status === 'failed' && isSuperAdmin ? (
                             <Button
                               size="small"
                               type="primary"
@@ -2455,7 +2574,13 @@ export default function PlatformControlCenter() {
                         className={styles.detailSection}
                         title="Current subscription"
                         size="small"
-                        extra={<Button type="link" onClick={() => openSubscriptionModal(selectedSubscription, selected.id)}>{selectedSubscription ? 'Edit' : 'Assign plan'}</Button>}
+                        extra={
+                          isSuperAdmin ? (
+                            <Button type="link" onClick={() => openSubscriptionModal(selectedSubscription, selected.id)}>
+                              {selectedSubscription ? 'Edit' : 'Assign plan'}
+                            </Button>
+                          ) : null
+                        }
                       >
                         {selectedSubscription ? (
                           <Descriptions column={1} size="small">
@@ -2469,7 +2594,18 @@ export default function PlatformControlCenter() {
                           <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No plan assigned" />
                         )}
                       </Card>
-                      <Card className={styles.detailSection} title="Platform feature controls" size="small" extra={<Button type="link" onClick={() => openFlagModal(null, selected.id)}>Add control</Button>}>
+                      <Card
+                        className={styles.detailSection}
+                        title="Platform feature controls"
+                        size="small"
+                        extra={
+                          isSuperAdmin ? (
+                            <Button type="link" onClick={() => openFlagModal(null, selected.id)}>
+                              Add control
+                            </Button>
+                          ) : null
+                        }
+                      >
                         <Table
                           rowKey="id"
                           size="small"
@@ -2511,9 +2647,11 @@ export default function PlatformControlCenter() {
                             <Text strong>{selectedHealth?.checks?.sessions?.active ?? '—'} active sessions</Text>
                             <div><Text type="secondary">{selectedHealth?.checks?.sessions?.total ?? '—'} total session records</Text></div>
                           </div>
-                          <Button danger icon={<KeyOutlined />} onClick={() => openTenantAction('revoke', selected)}>
-                            Revoke all
-                          </Button>
+                          {isSuperAdmin ? (
+                            <Button danger icon={<KeyOutlined />} onClick={() => openTenantAction('revoke', selected)}>
+                              Revoke all
+                            </Button>
+                          ) : null}
                         </div>
                       </Card>
                     </>
@@ -2542,16 +2680,44 @@ export default function PlatformControlCenter() {
                         </Descriptions>
                       </Card>
                       <Card className={`${styles.detailSection} ${styles.dangerZone}`} title="Lifecycle controls" size="small">
-                        <Space wrap>
-                          {selected.status === 'suspended' ? (
-                            <Button icon={<PlayCircleOutlined />} onClick={() => openTenantAction('resume', selected)}>Resume company</Button>
-                          ) : (
-                            <Button danger icon={<PauseCircleOutlined />} onClick={() => openTenantAction('suspend', selected)}>Suspend company</Button>
-                          )}
-                          <Button icon={<ExportOutlined />} onClick={() => exportTenant(selected)}>Export data</Button>
-                          <Button danger type="primary" icon={<DeleteOutlined />} disabled={selected.status !== 'suspended'} onClick={() => openTenantAction('offboard', selected)}>Offboard</Button>
-                        </Space>
-                        {selected.status !== 'suspended' ? <Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>Suspend the company before offboarding.</Paragraph> : null}
+                        {isSuperAdmin ? (
+                          <>
+                            <Space wrap>
+                              {selected.status === 'suspended' ? (
+                                <Button icon={<PlayCircleOutlined />} onClick={() => openTenantAction('resume', selected)}>
+                                  Resume company
+                                </Button>
+                              ) : selected.status === 'active' ? (
+                                <Button danger icon={<PauseCircleOutlined />} onClick={() => openTenantAction('suspend', selected)}>
+                                  Suspend company
+                                </Button>
+                              ) : null}
+                              <Button
+                                icon={<ExportOutlined />}
+                                disabled={!['active', 'suspended'].includes(selected.status)}
+                                onClick={() => exportTenant(selected)}
+                              >
+                                Export data
+                              </Button>
+                              <Button
+                                danger
+                                type="primary"
+                                icon={<DeleteOutlined />}
+                                disabled={selected.status !== 'suspended'}
+                                onClick={() => openTenantAction('offboard', selected)}
+                              >
+                                Offboard
+                              </Button>
+                            </Space>
+                            {selected.status !== 'suspended' ? (
+                              <Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+                                Suspend the company before offboarding.
+                              </Paragraph>
+                            ) : null}
+                          </>
+                        ) : (
+                          <Alert type="info" showIcon message="Lifecycle controls require a super administrator" />
+                        )}
                       </Card>
                     </>
                   ),
