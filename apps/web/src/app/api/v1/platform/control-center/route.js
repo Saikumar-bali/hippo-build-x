@@ -122,10 +122,18 @@ export const GET = withApiHandler(
         p.entitlements,
         p.created_at,
         p.updated_at,
-        COUNT(s.id)::int AS subscription_count,
-        COUNT(s.id) FILTER (WHERE s.status = 'active')::int AS active_subscription_count
+        COUNT(DISTINCT s.tenant_id)
+          FILTER (WHERE subscribed_tenant.id IS NOT NULL)::int AS subscription_count,
+        COUNT(DISTINCT s.tenant_id)
+          FILTER (
+            WHERE s.status = 'active'
+              AND subscribed_tenant.id IS NOT NULL
+          )::int AS active_subscription_count
       FROM plans p
       LEFT JOIN subscriptions s ON s.plan_id = p.id
+      LEFT JOIN tenants subscribed_tenant
+        ON subscribed_tenant.id = s.tenant_id
+       AND subscribed_tenant.deleted_at IS NULL
       GROUP BY p.id
       ORDER BY p.name
     `;
