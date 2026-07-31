@@ -80,6 +80,13 @@ export const GET = withApiHandler(
       ORDER BY t.created_at DESC
     `);
 
+    const platformUsers = await sql`
+      SELECT id, email, name, role, status, created_at, updated_at
+      FROM platform_users
+      WHERE deleted_at IS NULL
+      ORDER BY name, email
+    `;
+
     const plans = await sql`
       SELECT
         p.id,
@@ -180,6 +187,7 @@ export const GET = withApiHandler(
     return successResponse({
       summary,
       tenants,
+      platformUsers,
       plans,
       subscriptions,
       provisioningJobs,
