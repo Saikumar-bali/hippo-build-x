@@ -31,7 +31,7 @@ function retentionDays(value) {
     ? DEFAULT_RETENTION_DAYS
     : Number(value);
   if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
-    throw AppError.validation('Retention period must be a whole number from 1 to 365 days');
+    throw AppError.validation('retentionDays must be an integer between 1 and 365');
   }
   return parsed;
 }
