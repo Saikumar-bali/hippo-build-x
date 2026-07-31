@@ -7,6 +7,7 @@ import {
 } from '@/lib/api-utils';
 import { AppError } from '@hippo/shared';
 import {
+  isCurrentSubscriptionStatus,
   normalizeSubscriptionInput,
   requireSuperAdmin,
   writePlatformAudit,
@@ -34,7 +35,13 @@ export const GET = withApiHandler(
       `${SELECT_SUBSCRIPTIONS}
        WHERE t.deleted_at IS NULL
        ORDER BY t.name,
-         CASE WHEN s.status IN ('active','trial','paused') THEN 0 ELSE 1 END,
+         CASE
+           WHEN s.status IN ('active','trial','paused')
+             AND s.starts_at <= NOW()
+             AND (s.ends_at IS NULL OR s.ends_at > NOW()) THEN 0
+           WHEN s.status = 'scheduled' THEN 1
+           ELSE 2
+         END,
          s.starts_at DESC`,
     );
     return successResponse(rows);
@@ -59,31 +66,51 @@ export const POST = withApiHandler(
         throw AppError.conflict('A plan can be assigned after company setup is complete');
       }
 
+      // Share-lock the plan so an archival transaction cannot pass its usage
+      // check while a new assignment is concurrently being inserted.
       const [plan] = await tx`
-        SELECT id, code, name, status FROM plans WHERE id = ${input.planId} LIMIT 1
+        SELECT id, code, name, status FROM plans
+        WHERE id = ${input.planId}
+        FOR SHARE
       `;
       if (!plan) throw AppError.notFound('Plan', input.planId);
       if (plan.status !== 'active') throw AppError.conflict('Archived plans cannot be assigned');
 
-      const [previous] = await tx`
-        SELECT id, plan_id, status, starts_at, ends_at, notes
-        FROM subscriptions
-        WHERE tenant_id = ${input.tenantId}
-          AND status IN ('active', 'trial', 'paused')
-        ORDER BY starts_at DESC
-        LIMIT 1
-        FOR UPDATE
-      `;
-
-      if (previous) {
-        await tx`
-          UPDATE subscriptions
-          SET status = 'cancelled',
-              ends_at = COALESCE(ends_at, NOW()),
-              cancelled_at = NOW(),
-              updated_at = NOW()
-          WHERE id = ${previous.id}
+      let previous = null;
+      if (isCurrentSubscriptionStatus(input.status)) {
+        [previous] = await tx`
+          SELECT id, plan_id, status, starts_at, ends_at, notes
+          FROM subscriptions
+          WHERE tenant_id = ${input.tenantId}
+            AND status IN ('active', 'trial', 'paused')
+            AND starts_at <= NOW()
+            AND (ends_at IS NULL OR ends_at > NOW())
+          ORDER BY starts_at DESC
+          LIMIT 1
+          FOR UPDATE
         `;
+
+        if (previous) {
+          await tx`
+            UPDATE subscriptions
+            SET status = 'cancelled',
+                ends_at = LEAST(COALESCE(ends_at, NOW()), NOW()),
+                cancelled_at = NOW(),
+                updated_at = NOW()
+            WHERE id = ${previous.id}
+          `;
+        }
+      } else if (input.status === 'scheduled') {
+        const duplicate = await tx`
+          SELECT id FROM subscriptions
+          WHERE tenant_id = ${input.tenantId}
+            AND status = 'scheduled'
+            AND starts_at = ${input.startsAt}
+          LIMIT 1
+        `;
+        if (duplicate[0]) {
+          throw AppError.conflict('A subscription is already scheduled for that start time');
+        }
       }
 
       const [subscription] = await tx`
@@ -98,7 +125,7 @@ export const POST = withApiHandler(
 
       await writePlatformAudit({
         actor,
-        action: 'subscription.assigned',
+        action: input.status === 'scheduled' ? 'subscription.scheduled' : 'subscription.assigned',
         entityType: 'subscription',
         entityId: subscription.id,
         tenantId: input.tenantId,
