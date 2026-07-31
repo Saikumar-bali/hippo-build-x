@@ -57,6 +57,11 @@ test.describe('Locked tenant lifecycle', () => {
     await expect(setupTable).toContainText(tenantName);
     await expect(setupTable).toContainText('Completed');
 
+    await page.getByRole('tab', { name: 'Communication & features' }).click();
+    const settingsPane = page.locator('.ant-tabs-tabpane-active');
+    await expect(settingsPane.getByText('Platform administrators')).toBeVisible();
+    await expect(settingsPane.getByText(PLATFORM_EMAIL)).toBeVisible();
+
     await page.getByRole('button', { name: 'Logout' }).click();
     await page.waitForURL('**/platform/login');
 
