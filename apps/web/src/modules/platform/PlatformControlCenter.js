@@ -157,8 +157,19 @@ export default function PlatformControlCenter() {
   const hasWork = data.tenants.some(isSetupInProgress);
   useEffect(() => {
     if (!hasWork) return undefined;
-    const timer = setInterval(() => load({ quiet: true }), 4000);
-    return () => clearInterval(timer);
+
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      await load({ quiet: true });
+      if (!cancelled) timer = setTimeout(poll, 4000);
+    };
+
+    timer = setTimeout(poll, 4000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [hasWork, load]);
 
   const selected = useMemo(
@@ -166,7 +177,9 @@ export default function PlatformControlCenter() {
     [data.tenants, selectedId],
   );
   const selectedChannels = data.channels.filter((channel) => channel.tenant_id === selectedId);
-  const selectedFlags = data.featureFlags.filter((flag) => flag.tenant_id === selectedId);
+  const selectedFlags = data.featureFlags.filter(
+    (flag) => flag.tenant_id === null || flag.tenant_id === selectedId,
+  );
   const selectedSubscription = selected?.subscription_id
     ? data.subscriptions.find((item) => item.id === selected.subscription_id) || null
     : null;
@@ -680,7 +693,13 @@ export default function PlatformControlCenter() {
         {selected ? (
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Alert
-              type={selected.status === 'failed' ? 'error' : selected.status === 'active' ? 'success' : 'info'}
+              type={
+                selected.status === 'failed'
+                  ? 'error'
+                  : selected.status === 'active'
+                    ? 'success'
+                    : 'info'
+              }
               showIcon
               message={tenantStatusLabel(selected.status)}
               description={
