@@ -21,6 +21,7 @@ export const tenants = controlPlane.table('tenants', {
   isolationMode: varchar('isolation_mode', { length: 50 }).notNull().default('shared_schema'),
   databaseSecretRef: text('database_secret_ref'),
   databaseRegion: varchar('database_region', { length: 100 }),
+  storagePrefix: text('storage_prefix').notNull(),
   migrationVersion: varchar('migration_version', { length: 255 }),
   dataLocationStatus: varchar('data_location_status', { length: 50 }).notNull().default('ready'),
   branding: jsonb('branding').notNull().default({}),

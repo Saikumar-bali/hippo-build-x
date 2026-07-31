@@ -20,7 +20,7 @@ describe.skipIf(!hasDb)('locked control plane migrations', () => {
   beforeAll(async () => runControlPlaneMigrations());
   afterAll(async () => closeDb());
 
-  it('is idempotent and stores application tables outside public', async () => {
+  it('is idempotent and stores every PRD section 5 control-plane entity outside public', async () => {
     const first = await runControlPlaneMigrations();
     const second = await runControlPlaneMigrations();
     expect(second.applied).toEqual([]);
@@ -31,11 +31,17 @@ describe.skipIf(!hasDb)('locked control plane migrations', () => {
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'control_plane'
         AND table_type = 'BASE TABLE'
-        AND table_name IN ('tenants', 'platform_users', 'provisioning_jobs', 'tenant_channels')
+        AND table_name IN (
+          'tenants', 'platform_users', 'plans', 'subscriptions',
+          'provisioning_jobs', 'tenant_channels', 'feature_flags'
+        )
     `;
     expect(controlTables.map((row) => row.table_name).sort()).toEqual([
+      'feature_flags',
+      'plans',
       'platform_users',
       'provisioning_jobs',
+      'subscriptions',
       'tenant_channels',
       'tenants',
     ]);
@@ -99,7 +105,7 @@ describe.skipIf(!hasDb)('tenant provisioning state', () => {
     }
   });
 
-  it('creates immutable schema, local migration ledger, admin and channel vault', async () => {
+  it('creates immutable schema, storage prefix, migration ledger, admin and channel vaults', async () => {
     const steps = [];
     const result = await provisionTenantSchema(tenantId, schemaName, {
       adminEmail: `admin@${slug}.test`,
@@ -131,46 +137,68 @@ describe.skipIf(!hasDb)('tenant provisioning state', () => {
 
     const cp = createControlPlaneSql();
     const [tenant] = await cp`
-      SELECT status, migration_version FROM tenants WHERE id = ${tenantId}
+      SELECT status, storage_prefix, migration_version FROM tenants WHERE id = ${tenantId}
     `;
     expect(tenant.status).toBe(TENANT_STATUS.ACTIVE);
+    expect(tenant.storage_prefix).toBe(`tenants/${tenantId}/`);
     expect(tenant.migration_version).toContain('999_locked_tenant_rls.sql');
 
     const channels = await cp`
       SELECT channel_type, encrypted_credentials, verification_status
-      FROM tenant_channels WHERE tenant_id = ${tenantId}
+      FROM tenant_channels
+      WHERE tenant_id = ${tenantId}
+      ORDER BY channel_type
     `;
     expect(channels).toEqual([
       {
-        channel_type: 'default',
+        channel_type: 'email',
+        encrypted_credentials: null,
+        verification_status: 'not_configured',
+      },
+      {
+        channel_type: 'sms',
+        encrypted_credentials: null,
+        verification_status: 'not_configured',
+      },
+      {
+        channel_type: 'whatsapp',
         encrypted_credentials: null,
         verification_status: 'not_configured',
       },
     ]);
   });
 
-  it('upgrades an already-active tenant through the fleet runner', async () => {
+  it('upgrades its own active tenant through the fleet runner', async () => {
     const operator = getMigrationSql();
-    await operator.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL search_path TO "${schemaName}", pg_catalog`);
-      await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-      await tx.unsafe(`ALTER TABLE users DISABLE ROW LEVEL SECURITY`);
-      await tx`DELETE FROM _tenant_migrations WHERE migration_name = '999_locked_tenant_rls.sql'`;
-      await tx`DELETE FROM control_plane.tenant_migrations
-               WHERE tenant_id = ${tenantId} AND migration_name = '999_locked_tenant_rls.sql'`;
-    });
+    const cp = createControlPlaneSql();
+    const fleetTestStatus = `migration_test_${tenantId.replaceAll('-', '')}`;
 
-    const results = await runTenantMigrationFleet({ statuses: ['active'] });
-    const upgraded = results.find((result) => result.tenantId === tenantId);
-    expect(upgraded).toMatchObject({ ok: true });
-    expect(upgraded.applied).toContain('999_locked_tenant_rls.sql');
+    await cp`UPDATE tenants SET status = ${fleetTestStatus} WHERE id = ${tenantId}`;
+    try {
+      await operator.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL search_path TO "${schemaName}", pg_catalog`);
+        await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+        await tx.unsafe(`ALTER TABLE users DISABLE ROW LEVEL SECURITY`);
+        await tx`DELETE FROM _tenant_migrations WHERE migration_name = '999_locked_tenant_rls.sql'`;
+        await tx`DELETE FROM control_plane.tenant_migrations
+                 WHERE tenant_id = ${tenantId} AND migration_name = '999_locked_tenant_rls.sql'`;
+      });
 
-    const [policy] = await operator`
-      SELECT c.relrowsecurity, c.relforcerowsecurity
-      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = ${schemaName} AND c.relname = 'users'
-    `;
-    expect(policy).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true });
+      const results = await runTenantMigrationFleet({ statuses: [fleetTestStatus] });
+      expect(results).toHaveLength(1);
+      const upgraded = results[0];
+      expect(upgraded).toMatchObject({ tenantId, ok: true });
+      expect(upgraded.applied).toContain('999_locked_tenant_rls.sql');
+
+      const [policy] = await operator`
+        SELECT c.relrowsecurity, c.relforcerowsecurity
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ${schemaName} AND c.relname = 'users'
+      `;
+      expect(policy).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true });
+    } finally {
+      await cp`UPDATE tenants SET status = ${TENANT_STATUS.ACTIVE} WHERE id = ${tenantId}`;
+    }
   });
 
   it('is idempotent and validates migration checksums', async () => {
