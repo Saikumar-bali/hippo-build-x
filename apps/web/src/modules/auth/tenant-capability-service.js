@@ -34,9 +34,8 @@ function flagModuleKey(flagKey) {
   return KNOWN_MODULES.includes(normalized) ? normalized : null;
 }
 
-function planAllowsModule(entitlements, moduleName) {
+export function planAllowsModule(entitlements, moduleName) {
   const modules = Array.isArray(entitlements.modules) ? entitlements.modules : [];
-  if (!modules.length) return true;
   return modules.includes('all') || modules.includes(moduleName);
 }
 
@@ -53,6 +52,8 @@ export async function loadTenantCapabilities(schemaName, tenantId) {
        JOIN plans p ON p.id = s.plan_id
        WHERE s.tenant_id = $1
          AND s.status IN ('active', 'trial', 'paused')
+         AND s.starts_at <= NOW()
+         AND (s.ends_at IS NULL OR s.ends_at > NOW())
        ORDER BY s.starts_at DESC
        LIMIT 1`,
       [tenantId],
@@ -92,14 +93,22 @@ export async function loadTenantCapabilities(schemaName, tenantId) {
   const modules = {};
   const decisions = {};
   for (const moduleName of KNOWN_MODULES) {
-    const planAllowed = subscription ? planAllowsModule(entitlements, moduleName) : true;
+    // Commercial access fails closed. A tenant without a currently effective
+    // subscription, or a plan with an empty module list, receives no modules.
+    const planAllowed = Boolean(subscription) && planAllowsModule(entitlements, moduleName);
     const tenantAllowed = tenantFlags[moduleName] !== false;
     const globalControl = globalControls.get(moduleName);
     const tenantControl = tenantControls.get(moduleName);
 
     let enabled = planAllowed && tenantAllowed;
-    let source = !planAllowed ? 'plan' : !tenantAllowed ? 'tenant' : 'default';
-    let reason = null;
+    let source = !subscription
+      ? 'subscription_required'
+      : !planAllowed
+        ? 'plan'
+        : !tenantAllowed
+          ? 'tenant'
+          : 'default';
+    let reason = !subscription ? 'A current commercial subscription is required' : null;
 
     // A global false is an emergency platform kill-switch and always wins.
     if (globalControl?.value === false) {
@@ -112,10 +121,12 @@ export async function loadTenantCapabilities(schemaName, tenantId) {
       reason = tenantControl.reason;
     } else if (tenantControl?.value === true || globalControl?.value === true) {
       // Platform force-on can override the tenant preference, but never grant a
-      // module that the assigned commercial plan does not include.
+      // module that the current commercial plan does not include.
       enabled = planAllowed;
       source = tenantControl?.value === true ? 'platform_company' : 'platform_global';
-      reason = (tenantControl || globalControl)?.reason || null;
+      reason = enabled
+        ? (tenantControl || globalControl)?.reason || null
+        : 'The current plan does not include this module';
     }
 
     modules[moduleName] = enabled;
