@@ -15,6 +15,7 @@ import { createControlPlaneSql, createTenantSql } from '@hippo/db';
 import { verifyAccessToken } from './auth.js';
 import { extractAccessToken } from '@/modules/auth/cookie.js';
 import { loadUserAuthz } from '@/modules/auth/session-service.js';
+import { loadTenantCapabilities } from '@/modules/auth/tenant-capability-service.js';
 import { loadPlatformUser } from '@/modules/platform/platform-auth-service.js';
 import { enforceNotAuditorWrite, enforcePermission } from '@hippo/rbac';
 import { writeAuditLog } from '@/modules/audit/audit-service.js';
@@ -91,7 +92,10 @@ export async function resolveAuthFromRequest(request) {
     throw new AppError(ErrorCode.SERVICE_UNAVAILABLE, 'Tenant data source is not ready', 503);
   }
 
-  const authz = await loadUserAuthz(tenant.schema_name, payload.sub, tenant.id);
+  const [authz, capabilities] = await Promise.all([
+    loadUserAuthz(tenant.schema_name, payload.sub, tenant.id),
+    loadTenantCapabilities(tenant.schema_name, tenant.id),
+  ]);
   if (!authz) throw AppError.unauthorized('User not found');
   return {
     tenantId: tenant.id,
@@ -106,6 +110,9 @@ export async function resolveAuthFromRequest(request) {
     permissions: authz.permissions,
     projectIds: authz.projectIds,
     locationIds: authz.locationIds,
+    plan: capabilities.plan,
+    modules: capabilities.modules,
+    moduleDecisions: capabilities.moduleDecisions,
   };
 }
 
@@ -119,12 +126,18 @@ export async function resolveTenantFromRequest(request) {
   }
   const tenant = await resolveTenantRecord(tenantId);
   if (!tenant) throw new AppError(ErrorCode.TENANT_NOT_FOUND, 'Tenant not found', 404);
+  if (tenant.status === 'suspended') {
+    throw new AppError(ErrorCode.TENANT_SUSPENDED, 'Tenant is suspended', 403);
+  }
   if (tenant.status !== 'active') {
     throw new AppError(ErrorCode.TENANT_PROVISIONING_FAILED, 'Tenant is not active', 409);
   }
 
   const userId = request.headers.get('x-user-id') || undefined;
-  const authz = userId ? await loadUserAuthz(tenant.schema_name, userId, tenant.id) : null;
+  const [authz, capabilities] = await Promise.all([
+    userId ? loadUserAuthz(tenant.schema_name, userId, tenant.id) : null,
+    loadTenantCapabilities(tenant.schema_name, tenant.id),
+  ]);
   return {
     tenantId: tenant.id,
     schemaName: tenant.schema_name,
@@ -137,6 +150,9 @@ export async function resolveTenantFromRequest(request) {
     permissions: authz?.permissions || [],
     projectIds: authz?.projectIds || [],
     locationIds: authz?.locationIds || [],
+    plan: capabilities.plan,
+    modules: capabilities.modules,
+    moduleDecisions: capabilities.moduleDecisions,
   };
 }
 
