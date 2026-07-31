@@ -10,6 +10,7 @@ import {
   isCurrentSubscriptionStatus,
   normalizeSubscriptionInput,
   requireSuperAdmin,
+  validateSubscriptionWindow,
   writePlatformAudit,
 } from '@/modules/platform/platform-ops-service.js';
 
@@ -33,16 +34,44 @@ export const PATCH = withApiHandler(
       if (!Object.keys(input).length) throw AppError.validation('No subscription fields to update');
 
       const nextStatus = input.status || before.status;
+      const nextStartsAt = input.startsAt || before.starts_at;
+      const nextEndsAt = input.endsAt === undefined ? before.ends_at : input.endsAt;
+      validateSubscriptionWindow({
+        status: nextStatus,
+        startsAt: nextStartsAt,
+        endsAt: nextEndsAt,
+      });
+
+      const nextPlanId = input.planId || before.plan_id;
+      const [plan] = await tx`
+        SELECT id, status FROM plans WHERE id = ${nextPlanId} FOR SHARE
+      `;
+      if (!plan) throw AppError.notFound('Plan', nextPlanId);
+      if (plan.status !== 'active') throw AppError.conflict('Archived plans cannot be assigned');
+
+      let replaced = null;
       if (isCurrentSubscriptionStatus(nextStatus)) {
-        const duplicate = await tx`
-          SELECT id FROM subscriptions
+        [replaced] = await tx`
+          SELECT id, plan_id, status, starts_at, ends_at, notes
+          FROM subscriptions
           WHERE tenant_id = ${before.tenant_id}
             AND id <> ${id}
             AND status IN ('active', 'trial', 'paused')
+            AND starts_at <= NOW()
+            AND (ends_at IS NULL OR ends_at > NOW())
+          ORDER BY starts_at DESC
           LIMIT 1
+          FOR UPDATE
         `;
-        if (duplicate[0]) {
-          throw AppError.conflict('This company already has another current subscription');
+        if (replaced) {
+          await tx`
+            UPDATE subscriptions
+            SET status = 'cancelled',
+                ends_at = LEAST(COALESCE(ends_at, NOW()), NOW()),
+                cancelled_at = NOW(),
+                updated_at = NOW()
+            WHERE id = ${replaced.id}
+          `;
         }
       }
 
@@ -56,15 +85,13 @@ export const PATCH = withApiHandler(
       if (input.startsAt !== undefined) add('starts_at', input.startsAt);
       if (input.endsAt !== undefined) add('ends_at', input.endsAt);
       if (input.notes !== undefined) add('notes', input.notes);
-      if (input.planId !== undefined) {
-        const plan = await tx`SELECT id, status FROM plans WHERE id = ${input.planId} LIMIT 1`;
-        if (!plan[0]) throw AppError.notFound('Plan', input.planId);
-        if (plan[0].status !== 'active') throw AppError.conflict('Archived plans cannot be assigned');
-        add('plan_id', input.planId);
-      }
+      if (input.planId !== undefined) add('plan_id', input.planId);
       if (['cancelled', 'expired'].includes(input.status)) {
         fields.push('cancelled_at = COALESCE(cancelled_at, NOW())');
         if (input.endsAt === undefined) fields.push('ends_at = COALESCE(ends_at, NOW())');
+      }
+      if (isCurrentSubscriptionStatus(nextStatus)) {
+        fields.push('cancelled_at = NULL');
       }
       if (!fields.length) throw AppError.validation('No subscription fields to update');
       values.push(id);
@@ -84,7 +111,7 @@ export const PATCH = withApiHandler(
         entityType: 'subscription',
         entityId: id,
         tenantId: before.tenant_id,
-        before,
+        before: replaced ? { subscription: before, replaced } : before,
         after,
         sql: tx,
       });
