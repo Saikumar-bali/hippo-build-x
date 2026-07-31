@@ -29,8 +29,8 @@ export const POST = withApiHandler(
     const { id } = await context.params;
     const body = await parseBody(request);
     const mode = body.mode;
-    if (!['soft_delete', 'purge'].includes(mode)) {
-      throw AppError.validation('Mode must be soft_delete or purge');
+    if (!['soft_delete', 'purge', 'release_hold'].includes(mode)) {
+      throw AppError.validation('Mode must be soft_delete, purge or release_hold');
     }
 
     const reason = String(body.reason || '').trim();
@@ -41,6 +41,44 @@ export const POST = withApiHandler(
     const sql = controlPlaneSql();
     const tenant = await getPlatformTenant(id, { includeDeleted: true, sql });
     confirmation(body, tenant);
+
+    if (mode === 'release_hold') {
+      if (!tenant.deleted_at || tenant.data_location_status !== 'soft_deleted') {
+        throw AppError.conflict('Legal holds are managed only during the soft-delete recovery window');
+      }
+      const result = await sql.begin(async (tx) => {
+        const [before] = await tx`
+          SELECT id, mode, status, legal_hold, reason, evidence, requested_at
+          FROM tenant_deletion_jobs
+          WHERE tenant_id = ${id} AND legal_hold = true
+          ORDER BY requested_at DESC
+          LIMIT 1
+          FOR UPDATE
+        `;
+        if (!before) throw AppError.notFound('Active legal hold', id);
+        const [after] = await tx`
+          UPDATE tenant_deletion_jobs
+          SET legal_hold = false,
+              evidence = COALESCE(evidence, '{}'::jsonb) ||
+                ${JSON.stringify({ legalHoldReleasedAt: new Date().toISOString(), legalHoldReleaseReason: reason })}::jsonb
+          WHERE id = ${before.id}
+          RETURNING id, mode, status, legal_hold, requested_at, completed_at, reason, evidence
+        `;
+        await writePlatformAudit({
+          actor,
+          action: 'tenant.legal_hold_released',
+          entityType: 'tenant_deletion',
+          entityId: before.id,
+          tenantId: id,
+          before,
+          after,
+          metadata: { reason },
+          sql: tx,
+        });
+        return after;
+      });
+      return successResponse(result);
+    }
 
     if (mode === 'soft_delete') {
       if (tenant.deleted_at) {
@@ -105,7 +143,7 @@ export const POST = withApiHandler(
     }
     const [hold] = await sql`
       SELECT id FROM tenant_deletion_jobs
-      WHERE tenant_id = ${id} AND legal_hold = true AND cancelled_at IS NULL
+      WHERE tenant_id = ${id} AND legal_hold = true
       ORDER BY requested_at DESC LIMIT 1
     `;
     if (hold) throw AppError.conflict('Remove the legal hold before scheduling permanent purge');
