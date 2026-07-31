@@ -1,4 +1,4 @@
-ALTER TABLE tenants
+ALTER TABLE control_plane.tenants
   ADD COLUMN IF NOT EXISTS storage_prefix TEXT;
 
 CREATE OR REPLACE FUNCTION control_plane.set_tenant_storage_prefix()
@@ -20,28 +20,28 @@ ON control_plane.tenants
 FOR EACH ROW
 EXECUTE FUNCTION control_plane.set_tenant_storage_prefix();
 
-UPDATE tenants
+UPDATE control_plane.tenants
 SET storage_prefix = 'tenants/' || id::text || '/'
 WHERE storage_prefix IS NULL OR btrim(storage_prefix) = '';
 
-ALTER TABLE tenants
+ALTER TABLE control_plane.tenants
   ALTER COLUMN storage_prefix SET NOT NULL;
 
-INSERT INTO tenant_channels
+INSERT INTO control_plane.tenant_channels
   (tenant_id, channel_type, provider, verification_status)
 SELECT
   tenant.id,
   channel.channel_type,
   'unconfigured',
   'not_configured'
-FROM tenants tenant
+FROM control_plane.tenants tenant
 CROSS JOIN (
   VALUES ('email'), ('sms'), ('whatsapp')
 ) AS channel(channel_type)
 WHERE tenant.deleted_at IS NULL
 ON CONFLICT (tenant_id, channel_type) DO NOTHING;
 
-DELETE FROM tenant_channels
+DELETE FROM control_plane.tenant_channels
 WHERE channel_type = 'default'
   AND provider = 'unconfigured'
   AND encrypted_credentials IS NULL;
@@ -76,13 +76,13 @@ FOR EACH ROW
 EXECUTE FUNCTION control_plane.expand_default_tenant_channel();
 
 CREATE INDEX IF NOT EXISTS subscriptions_tenant_status_idx
-  ON subscriptions (tenant_id, status, starts_at DESC);
+  ON control_plane.subscriptions (tenant_id, status, starts_at DESC);
 
 CREATE INDEX IF NOT EXISTS provisioning_jobs_tenant_created_idx
-  ON provisioning_jobs (tenant_id, created_at DESC);
+  ON control_plane.provisioning_jobs (tenant_id, created_at DESC);
 
 CREATE INDEX IF NOT EXISTS tenant_channels_tenant_idx
-  ON tenant_channels (tenant_id, channel_type);
+  ON control_plane.tenant_channels (tenant_id, channel_type);
 
 CREATE INDEX IF NOT EXISTS feature_flags_tenant_idx
-  ON feature_flags (tenant_id, flag_key);
+  ON control_plane.feature_flags (tenant_id, flag_key);
