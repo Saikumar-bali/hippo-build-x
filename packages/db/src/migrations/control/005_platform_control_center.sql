@@ -46,6 +46,35 @@ WHERE channel_type = 'default'
   AND provider = 'unconfigured'
   AND encrypted_credentials IS NULL;
 
+CREATE OR REPLACE FUNCTION control_plane.expand_default_tenant_channel()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.channel_type = 'default'
+     AND NEW.provider = 'unconfigured'
+     AND NEW.encrypted_credentials IS NULL THEN
+    INSERT INTO control_plane.tenant_channels
+      (tenant_id, channel_type, provider, verification_status)
+    VALUES
+      (NEW.tenant_id, 'email', 'unconfigured', 'not_configured'),
+      (NEW.tenant_id, 'sms', 'unconfigured', 'not_configured'),
+      (NEW.tenant_id, 'whatsapp', 'unconfigured', 'not_configured')
+    ON CONFLICT (tenant_id, channel_type) DO NOTHING;
+    RETURN NULL;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS tenant_channels_expand_default_trg
+  ON control_plane.tenant_channels;
+CREATE TRIGGER tenant_channels_expand_default_trg
+BEFORE INSERT
+ON control_plane.tenant_channels
+FOR EACH ROW
+EXECUTE FUNCTION control_plane.expand_default_tenant_channel();
+
 CREATE INDEX IF NOT EXISTS subscriptions_tenant_status_idx
   ON subscriptions (tenant_id, status, starts_at DESC);
 
