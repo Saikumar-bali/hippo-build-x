@@ -322,6 +322,7 @@ export async function getTenantHealthSnapshot(tenantId) {
     tenant.status === 'active' &&
     schemaRow?.schema_exists === true &&
     tenant.data_location_status === 'ready' &&
+    Boolean(subscription) &&
     !staleJob;
 
   return {
