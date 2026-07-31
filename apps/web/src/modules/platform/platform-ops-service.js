@@ -3,12 +3,29 @@ import { AppError, ErrorCode } from '@hippo/shared';
 import { getRequestId } from '@/lib/tenant-context.js';
 
 const PLAN_STATUSES = new Set(['active', 'archived']);
-const SUBSCRIPTION_STATUSES = new Set(['trial', 'active', 'paused', 'expired', 'cancelled']);
+const SUBSCRIPTION_STATUSES = new Set([
+  'scheduled',
+  'trial',
+  'active',
+  'paused',
+  'expired',
+  'cancelled',
+]);
 const CURRENT_SUBSCRIPTION_STATUSES = new Set(['trial', 'active', 'paused']);
 
-function integer(value, fallback = 0, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+function strictInteger(
+  value,
+  fieldName,
+  { defaultValue = 0, min = 0, max = Number.MAX_SAFE_INTEGER, required = false } = {},
+) {
+  if (value === undefined || value === null || value === '') {
+    if (required) throw AppError.validation(`${fieldName} is required`);
+    return defaultValue;
+  }
   const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < min || parsed > max) return fallback;
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < min || parsed > max) {
+    throw AppError.validation(`${fieldName} must be an integer between ${min} and ${max}`);
+  }
   return parsed;
 }
 
@@ -56,10 +73,18 @@ export function normalizePlanInput(body, { partial = false } = {}) {
   }
 
   if (body.monthlyPriceCents !== undefined || !partial) {
-    result.monthlyPriceCents = integer(body.monthlyPriceCents, 0, { min: 0, max: 1_000_000_000 });
+    result.monthlyPriceCents = strictInteger(body.monthlyPriceCents, 'Monthly price', {
+      defaultValue: 0,
+      min: 0,
+      max: 1_000_000_000,
+    });
   }
   if (body.annualPriceCents !== undefined || !partial) {
-    result.annualPriceCents = integer(body.annualPriceCents, 0, { min: 0, max: 10_000_000_000 });
+    result.annualPriceCents = strictInteger(body.annualPriceCents, 'Annual price', {
+      defaultValue: 0,
+      min: 0,
+      max: 10_000_000_000,
+    });
   }
   if (body.currency !== undefined || !partial) {
     const currency = String(body.currency || 'INR').trim().toUpperCase();
@@ -67,10 +92,18 @@ export function normalizePlanInput(body, { partial = false } = {}) {
     result.currency = currency;
   }
   if (body.trialDays !== undefined || !partial) {
-    result.trialDays = integer(body.trialDays, 0, { min: 0, max: 365 });
+    result.trialDays = strictInteger(body.trialDays, 'Trial days', {
+      defaultValue: 0,
+      min: 0,
+      max: 365,
+    });
   }
   if (body.displayOrder !== undefined || !partial) {
-    result.displayOrder = integer(body.displayOrder, 0, { min: 0, max: 10_000 });
+    result.displayOrder = strictInteger(body.displayOrder, 'Display order', {
+      defaultValue: 0,
+      min: 0,
+      max: 10_000,
+    });
   }
 
   if (body.entitlements !== undefined || !partial) {
@@ -78,19 +111,48 @@ export function normalizePlanInput(body, { partial = false } = {}) {
     if (!entitlements || Array.isArray(entitlements) || typeof entitlements !== 'object') {
       throw AppError.validation('Entitlements must be an object');
     }
-    const modules = Array.isArray(entitlements.modules)
-      ? [...new Set(entitlements.modules.map((item) => String(item).trim()).filter(Boolean))]
-      : [];
+    if (entitlements.modules !== undefined && !Array.isArray(entitlements.modules)) {
+      throw AppError.validation('Entitlement modules must be an array');
+    }
+    const modules = [
+      ...new Set((entitlements.modules || []).map((item) => String(item).trim()).filter(Boolean)),
+    ];
     result.entitlements = {
-      ...entitlements,
-      users: integer(entitlements.users, 0, { min: -1, max: 1_000_000 }),
-      projects: integer(entitlements.projects, 0, { min: -1, max: 1_000_000 }),
-      storageGb: integer(entitlements.storageGb, 0, { min: 0, max: 1_000_000 }),
+      users: strictInteger(entitlements.users, 'User limit', {
+        defaultValue: 0,
+        min: -1,
+        max: 1_000_000,
+      }),
+      projects: strictInteger(entitlements.projects, 'Project limit', {
+        defaultValue: 0,
+        min: -1,
+        max: 1_000_000,
+      }),
       modules,
     };
   }
 
   return result;
+}
+
+export function validateSubscriptionWindow({ status, startsAt, endsAt, now = new Date() }) {
+  const start = startsAt ? new Date(startsAt) : null;
+  const end = endsAt ? new Date(endsAt) : null;
+  if (!start || Number.isNaN(start.getTime())) throw AppError.validation('Start date must be valid');
+  if (end && Number.isNaN(end.getTime())) throw AppError.validation('End date must be valid');
+  if (end && end <= start) throw AppError.validation('End date must be later than start date');
+
+  if (status === 'scheduled' && start <= now) {
+    throw AppError.validation('Scheduled subscriptions must start in the future');
+  }
+  if (CURRENT_SUBSCRIPTION_STATUSES.has(status)) {
+    if (start > now) {
+      throw AppError.validation('Use scheduled status for a future subscription start');
+    }
+    if (end && end <= now) {
+      throw AppError.validation('A current subscription cannot already be expired');
+    }
+  }
 }
 
 export function normalizeSubscriptionInput(body, { partial = false } = {}) {
@@ -112,7 +174,13 @@ export function normalizeSubscriptionInput(body, { partial = false } = {}) {
   if (body.endsAt !== undefined) result.endsAt = nullableDate(body.endsAt, 'End date');
   if (body.notes !== undefined) result.notes = String(body.notes || '').trim() || null;
 
-  if (result.startsAt && result.endsAt && new Date(result.endsAt) <= new Date(result.startsAt)) {
+  if (!partial) {
+    validateSubscriptionWindow({
+      status: result.status,
+      startsAt: result.startsAt,
+      endsAt: result.endsAt,
+    });
+  } else if (result.startsAt && result.endsAt && new Date(result.endsAt) <= new Date(result.startsAt)) {
     throw AppError.validation('End date must be later than start date');
   }
   return result;
@@ -126,11 +194,15 @@ export function normalizeFeatureFlagInput(body) {
   if (![true, false, null].includes(body.forcedValue)) {
     throw AppError.validation('Forced value must be true, false or null');
   }
+  const reason = String(body.reason || '').trim() || null;
+  if (body.forcedValue !== null && (!reason || reason.length < 5)) {
+    throw AppError.validation('A feature control reason of at least 5 characters is required');
+  }
   return {
     tenantId: body.tenantId || null,
     flagKey,
     forcedValue: body.forcedValue,
-    reason: String(body.reason || '').trim() || null,
+    reason,
   };
 }
 
@@ -235,8 +307,10 @@ export async function getTenantHealthSnapshot(tenantId) {
      FROM subscriptions s
      JOIN plans p ON p.id = s.plan_id
      WHERE s.tenant_id = $1
-     ORDER BY CASE WHEN s.status IN ('active','trial','paused') THEN 0 ELSE 1 END,
-              s.starts_at DESC
+       AND s.status IN ('active', 'trial', 'paused')
+       AND s.starts_at <= NOW()
+       AND (s.ends_at IS NULL OR s.ends_at > NOW())
+     ORDER BY s.starts_at DESC
      LIMIT 1`,
     [tenant.id],
   );
