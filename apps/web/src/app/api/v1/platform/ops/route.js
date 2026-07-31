@@ -82,6 +82,35 @@ async function redisAndQueueStatus() {
   }
 }
 
+function summarizeWorkers(heartbeats) {
+  const instances = heartbeats
+    .filter((item) => item.service_name === 'hippo-worker')
+    .map((item) => ({
+      ...item,
+      effectiveStatus:
+        item.status === 'healthy' && item.age_seconds <= 45
+          ? 'healthy'
+          : item.status === 'healthy'
+            ? 'stale'
+            : item.status,
+    }));
+  const healthyInstances = instances.filter((item) => item.effectiveStatus === 'healthy');
+  const status = healthyInstances.length
+    ? 'healthy'
+    : instances.length
+      ? instances.some((item) => item.effectiveStatus === 'stale')
+        ? 'stale'
+        : instances[0].effectiveStatus
+      : 'missing';
+  return {
+    status,
+    instanceCount: instances.length,
+    healthyInstanceCount: healthyInstances.length,
+    last_seen_at: instances[0]?.last_seen_at || null,
+    instances,
+  };
+}
+
 export const GET = withApiHandler(
   { platform: true, auth: false, platformAuth: true },
   async () => {
@@ -132,31 +161,29 @@ export const GET = withApiHandler(
       SELECT service_name, instance_id, status, metadata, last_seen_at,
              EXTRACT(EPOCH FROM (NOW() - last_seen_at))::int AS age_seconds
       FROM service_heartbeats
-      ORDER BY service_name
+      ORDER BY service_name, last_seen_at DESC
     `;
 
     const offboarding = await sql`
       SELECT
         COUNT(*) FILTER (WHERE status = 'scheduled')::int AS scheduled,
-        COUNT(*) FILTER (WHERE status = 'running')::int AS running,
-        COUNT(*) FILTER (WHERE status = 'failed')::int AS failed,
+        COUNT(*) FILTER (WHERE status IN ('running', 'destruction_pending'))::int AS running,
+        COUNT(*) FILTER (WHERE status IN ('failed', 'reconciliation_required'))::int AS failed,
         MIN(scheduled_for) FILTER (WHERE status = 'scheduled') AS next_scheduled_for
       FROM tenant_deletion_jobs
     `;
 
-    const worker = heartbeats.find((item) => item.service_name === 'hippo-worker') || null;
-    const workerStatus = !worker
-      ? 'missing'
-      : worker.status !== 'healthy'
-        ? worker.status
-        : worker.age_seconds > 45
-          ? 'stale'
-          : 'healthy';
+    const worker = summarizeWorkers(heartbeats);
+    const queuesHealthy = queueStatus.queues.every(
+      (queue) => queue.status === 'healthy' && Number(queue.failed || 0) === 0,
+    );
     const ready =
       database.status === 'healthy' &&
       queueStatus.redis.status === 'healthy' &&
-      workerStatus === 'healthy' &&
-      jobSummary.stale === 0;
+      worker.status === 'healthy' &&
+      queuesHealthy &&
+      jobSummary.stale === 0 &&
+      offboarding.failed === 0;
 
     return successResponse({
       status: ready ? 'healthy' : 'attention',
@@ -165,7 +192,7 @@ export const GET = withApiHandler(
         web: { status: 'healthy' },
         database,
         redis: queueStatus.redis,
-        worker: worker ? { ...worker, status: workerStatus } : { status: workerStatus },
+        worker,
       },
       queues: queueStatus.queues,
       tenants: tenantSummary,
