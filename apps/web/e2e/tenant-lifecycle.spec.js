@@ -5,7 +5,7 @@ const PLATFORM_PASSWORD = 'SuperAdmin@12345';
 const TENANT_DEFAULT_PASSWORD = 'Admin@12345';
 
 test.describe('Locked tenant lifecycle', () => {
-  test('platform login → isolated provision → tenant login', async ({ page }) => {
+  test('platform login → simple company setup → tenant login', async ({ page }) => {
     const tenantSlug = `pw-e2e-${Date.now()}`;
     const tenantName = `Playwright E2E ${Date.now()}`;
     const adminEmail = `admin@${tenantSlug}.test`;
@@ -23,30 +23,37 @@ test.describe('Locked tenant lifecycle', () => {
     expect((await platformLogin).status()).toBe(200);
 
     await page.waitForURL('**/platform/tenants');
-    await expect(page.getByText('Platform Control Plane')).toBeVisible();
-    await expect(page.getByText('Locked isolation policy')).toBeVisible();
+    await expect(page.getByText('Hippo Build Platform Admin')).toBeVisible();
+    await expect(page.getByText('Automatic protection')).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Plans & subscriptions' })).toBeVisible();
+    await expect(page.getByRole('tab', { name: 'Setup activity' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Provision tenant' }).click();
+    await page.getByRole('button', { name: 'Add company' }).click();
     const modal = page.locator('.ant-modal');
-    await modal.getByRole('textbox', { name: 'Organization name' }).fill(tenantName);
-    await modal.getByRole('textbox', { name: 'Tenant slug' }).fill(tenantSlug);
-    await modal.getByRole('textbox', { name: 'Initial administrator email' }).fill(adminEmail);
+    await modal.getByRole('textbox', { name: 'Company name' }).fill(tenantName);
+    await modal.getByRole('textbox', { name: 'Login name' }).fill(tenantSlug);
+    await modal.getByRole('textbox', { name: 'Administrator email' }).fill(adminEmail);
     await modal.getByRole('textbox', { name: 'Administrator name' }).fill('E2E Admin');
-    await modal.getByRole('button', { name: 'Start provisioning' }).click();
+    await modal.getByRole('button', { name: 'Start setup' }).click();
 
     await expect(page.locator('.ant-table-tbody')).toContainText(tenantName, { timeout: 20000 });
-    await expect(page.getByText('Shared DB · isolated schema').first()).toBeVisible();
+    await expect(page.locator('.ant-table-tbody')).toContainText('Ready', { timeout: 30000 });
 
     const drawer = page.locator('.ant-drawer-content');
     await expect(drawer).toBeVisible();
-    await expect(drawer.getByText(/^tenant_[0-9a-f]{32}$/)).toBeVisible();
-    await expect(drawer.getByText('Channel credential vault')).toBeVisible();
+    await expect(drawer.getByText('This company is ready to use Hippo Build.')).toBeVisible({ timeout: 10000 });
+    await expect(drawer.getByText('Communication')).toBeVisible();
+    await expect(drawer.locator('.ant-table-tbody')).toContainText('email');
+    await expect(drawer.locator('.ant-table-tbody')).toContainText('sms');
+    await expect(drawer.locator('.ant-table-tbody')).toContainText('whatsapp');
 
-    await expect(page.locator('.ant-table-tbody')).toContainText('ACTIVE', { timeout: 30000 });
-    const drawerStatus = drawer.locator('.ant-descriptions-row').filter({ hasText: 'Status' });
-    await expect(drawerStatus).toContainText('active', { timeout: 10000 });
-    await expect(drawer.locator('.ant-steps-item-finish')).toHaveCount(8);
+    await drawer.getByText('Advanced details').click();
+    await expect(drawer.getByText(new RegExp(`tenants/${tenantSlug.includes('never') ? tenantSlug : '[0-9a-f-]+'}/`))).toBeVisible();
     await page.locator('.ant-drawer-close').click();
+
+    await page.getByRole('tab', { name: 'Setup activity' }).click();
+    await expect(page.locator('.ant-table-tbody')).toContainText(tenantName);
+    await expect(page.locator('.ant-table-tbody')).toContainText('Completed');
 
     await page.getByRole('button', { name: 'Logout' }).click();
     await page.waitForURL('**/platform/login');
