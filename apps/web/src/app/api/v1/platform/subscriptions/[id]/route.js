@@ -19,6 +19,9 @@ export const PATCH = withApiHandler(
     const actor = requireSuperAdmin(requirePlatformUser());
     const { id } = await context.params;
     const input = normalizeSubscriptionInput(await parseBody(request), { partial: true });
+    if (input.tenantId !== undefined) {
+      throw AppError.validation('A subscription cannot be moved to another company');
+    }
     const sql = controlPlaneSql();
 
     const subscription = await sql.begin(async (tx) => {
@@ -54,7 +57,7 @@ export const PATCH = withApiHandler(
       if (input.endsAt !== undefined) add('ends_at', input.endsAt);
       if (input.notes !== undefined) add('notes', input.notes);
       if (input.planId !== undefined) {
-        const plan = await tx`SELECT id, status FROM plans WHERE id = ${input.planId}`;
+        const plan = await tx`SELECT id, status FROM plans WHERE id = ${input.planId} LIMIT 1`;
         if (!plan[0]) throw AppError.notFound('Plan', input.planId);
         if (plan[0].status !== 'active') throw AppError.conflict('Archived plans cannot be assigned');
         add('plan_id', input.planId);
@@ -63,6 +66,7 @@ export const PATCH = withApiHandler(
         fields.push('cancelled_at = COALESCE(cancelled_at, NOW())');
         if (input.endsAt === undefined) fields.push('ends_at = COALESCE(ends_at, NOW())');
       }
+      if (!fields.length) throw AppError.validation('No subscription fields to update');
       values.push(id);
 
       const [after] = await tx.unsafe(
