@@ -5,9 +5,11 @@ import {
   timestamp,
   jsonb,
   unique,
+  primaryKey,
   text,
   integer,
   boolean,
+  bigint,
 } from 'drizzle-orm/pg-core';
 
 export const controlPlane = pgSchema('control_plane');
@@ -112,13 +114,17 @@ export const tenantChannels = controlPlane.table(
   (table) => [unique('tenant_channels_tenant_type_uq').on(table.tenantId, table.channelType)],
 );
 
-// Phase 12 ownership. Tables exist now so tenant routing and entitlement contracts
-// do not require a later control-plane redesign; no Phase 12 management APIs ship here.
 export const plans = controlPlane.table('plans', {
   id: uuid('id').primaryKey().defaultRandom(),
   code: varchar('code', { length: 100 }).notNull().unique(),
   name: varchar('name', { length: 255 }).notNull(),
+  description: text('description'),
   status: varchar('status', { length: 50 }).notNull().default('active'),
+  monthlyPriceCents: integer('monthly_price_cents').notNull().default(0),
+  annualPriceCents: integer('annual_price_cents').notNull().default(0),
+  currency: varchar('currency', { length: 3 }).notNull().default('INR'),
+  trialDays: integer('trial_days').notNull().default(0),
+  displayOrder: integer('display_order').notNull().default(0),
   entitlements: jsonb('entitlements').notNull().default({}),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -135,6 +141,9 @@ export const subscriptions = controlPlane.table('subscriptions', {
   status: varchar('status', { length: 50 }).notNull().default('active'),
   startsAt: timestamp('starts_at', { withTimezone: true }).notNull().defaultNow(),
   endsAt: timestamp('ends_at', { withTimezone: true }),
+  assignedBy: uuid('assigned_by').references(() => platformUsers.id),
+  notes: text('notes'),
+  cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -148,6 +157,85 @@ export const featureFlags = controlPlane.table('feature_flags', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
+
+export const platformAuditLogs = controlPlane.table('platform_audit_logs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  actorId: uuid('actor_id').references(() => platformUsers.id),
+  actorEmail: varchar('actor_email', { length: 255 }),
+  action: varchar('action', { length: 120 }).notNull(),
+  entityType: varchar('entity_type', { length: 100 }).notNull(),
+  entityId: text('entity_id'),
+  tenantId: uuid('tenant_id').references(() => tenants.id),
+  beforeState: jsonb('before_state'),
+  afterState: jsonb('after_state'),
+  metadata: jsonb('metadata').notNull().default({}),
+  requestId: varchar('request_id', { length: 255 }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+export const tenantExportJobs = controlPlane.table('tenant_export_jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id')
+    .notNull()
+    .references(() => tenants.id),
+  status: varchar('status', { length: 50 }).notNull().default('queued'),
+  format: varchar('format', { length: 20 }).notNull().default('json'),
+  tableCount: integer('table_count').notNull().default(0),
+  rowCount: bigint('row_count', { mode: 'number' }).notNull().default(0),
+  byteCount: bigint('byte_count', { mode: 'number' }).notNull().default(0),
+  requestedBy: uuid('requested_by').references(() => platformUsers.id),
+  requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }),
+  errorMessage: text('error_message'),
+  manifest: jsonb('manifest').notNull().default({}),
+});
+
+export const tenantDeletionJobs = controlPlane.table('tenant_deletion_jobs', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  tenantId: uuid('tenant_id')
+    .notNull()
+    .references(() => tenants.id),
+  mode: varchar('mode', { length: 30 }).notNull(),
+  status: varchar('status', { length: 50 }).notNull().default('scheduled'),
+  legalHold: boolean('legal_hold').notNull().default(false),
+  requestedBy: uuid('requested_by').references(() => platformUsers.id),
+  approvedBy: uuid('approved_by').references(() => platformUsers.id),
+  requestedAt: timestamp('requested_at', { withTimezone: true }).notNull().defaultNow(),
+  scheduledFor: timestamp('scheduled_for', { withTimezone: true }),
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  completedAt: timestamp('completed_at', { withTimezone: true }),
+  cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  leaseOwner: varchar('lease_owner', { length: 255 }),
+  leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+  destructionStartedAt: timestamp('destruction_started_at', { withTimezone: true }),
+  storagePurgedAt: timestamp('storage_purged_at', { withTimezone: true }),
+  schemaDroppedAt: timestamp('schema_dropped_at', { withTimezone: true }),
+  reconciliationRequired: boolean('reconciliation_required').notNull().default(false),
+  attemptCount: integer('attempt_count').notNull().default(0),
+  reason: text('reason'),
+  errorMessage: text('error_message'),
+  evidence: jsonb('evidence').notNull().default({}),
+});
+
+export const serviceHeartbeats = controlPlane.table(
+  'service_heartbeats',
+  {
+    serviceName: varchar('service_name', { length: 100 }).notNull(),
+    instanceId: varchar('instance_id', { length: 255 }).notNull(),
+    status: varchar('status', { length: 30 }).notNull().default('healthy'),
+    metadata: jsonb('metadata').notNull().default({}),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: 'service_heartbeats_pkey',
+      columns: [table.serviceName, table.instanceId],
+    }),
+  ],
+);
 
 export const TENANT_STATUS = Object.freeze({
   PROVISIONING: 'provisioning',

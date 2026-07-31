@@ -72,6 +72,11 @@ export function createControlPlaneSql() {
       await bindControlPlane(tx);
       return callback(tx);
     });
+  query.snapshot = (callback) =>
+    sql.begin('isolation level repeatable read read only', async (tx) => {
+      await bindControlPlane(tx);
+      return callback(tx);
+    });
   query.schemaName = CONTROL_PLANE_SCHEMA;
   return query;
 }
@@ -95,6 +100,11 @@ export function createTenantSql(schemaName, tenantId) {
     });
   query.begin = (callback) =>
     sql.begin(async (tx) => {
+      await bindTenant(tx, schemaName, tenantId);
+      return callback(tx);
+    });
+  query.snapshot = (callback) =>
+    sql.begin('isolation level repeatable read read only', async (tx) => {
       await bindTenant(tx, schemaName, tenantId);
       return callback(tx);
     });

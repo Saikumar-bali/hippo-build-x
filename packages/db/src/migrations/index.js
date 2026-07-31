@@ -36,6 +36,12 @@ async function grantRuntimeAccess(tx, schemaName) {
   // have independent ACLs, so granting the underlying control-plane tables is
   // insufficient for older instances whose search path still resolves here.
   if (schemaName === 'control_plane') {
+    // Platform audit evidence is append-only for the application role. The
+    // database trigger is a second line of defence, but the ACL must not claim
+    // that web or worker processes can rewrite or delete history.
+    await tx.unsafe(`REVOKE UPDATE, DELETE ON control_plane.platform_audit_logs FROM ${role}`);
+    await tx.unsafe(`GRANT SELECT, INSERT ON control_plane.platform_audit_logs TO ${role}`);
+
     const compatibilityViews = await tx`
       SELECT table_name
       FROM information_schema.views

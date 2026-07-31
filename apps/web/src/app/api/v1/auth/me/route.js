@@ -11,6 +11,9 @@ export const GET = withApiHandler({ auth: true }, async () => {
     permissions: authz.permissions,
     projectIds: authz.projectIds,
     locationIds: authz.locationIds,
+    plan: ctx.plan || null,
+    modules: ctx.modules || {},
+    moduleDecisions: ctx.moduleDecisions || {},
     tenant: {
       id: ctx.tenantId,
       slug: ctx.slug,

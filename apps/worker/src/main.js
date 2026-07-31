@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { Worker } from 'bullmq';
 import IORedis from 'ioredis';
 import {
@@ -13,6 +14,8 @@ import {
   getProvisioningFailureTransition,
 } from './provisioning-attempt.js';
 import { reportProvisioningStep } from './provisioning-progress.js';
+import { startPlatformOpsLoops } from './platform-ops.js';
+import { ensureStarterTrial } from './subscription-provisioning.js';
 
 const log = createLogger({ service: 'hippo-worker' });
 validateEnv(workerEnvSchema);
@@ -154,6 +157,7 @@ const tenantProvisionWorker = new Worker(
             includeBullMqProgress: true,
           }),
       });
+      const starterTrial = await ensureStarterTrial(tenantId);
       await reportJobState({
         currentStep: 'active',
         values: { status: 'completed', currentStep: 'active', finished: true },
@@ -161,8 +165,13 @@ const tenantProvisionWorker = new Worker(
         tenantId,
         provisioningJobId,
       });
-      log.info('Tenant provisioned', { ...result, provisioningJobId, jobId: job.id });
-      return result;
+      log.info('Tenant provisioned', {
+        ...result,
+        starterTrialCreated: starterTrial.created,
+        provisioningJobId,
+        jobId: job.id,
+      });
+      return { ...result, starterTrialCreated: starterTrial.created };
     } catch (error) {
       const errorMessage = String(error.message).slice(0, 2000);
       const failure = getProvisioningFailureTransition(job, errorMessage);
@@ -241,12 +250,26 @@ tenantProvisionWorker.on('failed', (job, error) =>
   log.error('tenant.provision failed', { jobId: job?.id, err: error.message }),
 );
 
-log.info('Worker started', { queues: ['tenant.provision', 'notifications', 'reports'] });
+const queues = ['tenant.provision', 'notifications', 'reports'];
+const workerInstanceId = process.env.WORKER_INSTANCE_ID || process.env.HOSTNAME || randomUUID();
+const stopPlatformOps = startPlatformOpsLoops({ instanceId: workerInstanceId, queues });
 
-process.on('SIGTERM', async () => {
-  await tenantProvisionWorker.close();
-  await notificationWorker.close();
-  await reportWorker.close();
+log.info('Worker started', { queues, workerInstanceId });
+
+let shuttingDown = false;
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info('Worker shutting down', { signal, workerInstanceId });
+  await stopPlatformOps();
+  await Promise.all([
+    tenantProvisionWorker.close(),
+    notificationWorker.close(),
+    reportWorker.close(),
+  ]);
   await connection.quit();
   process.exit(0);
-});
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
