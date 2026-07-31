@@ -1,9 +1,24 @@
 import { successResponse, withApiHandler, controlPlaneSql } from '@/lib/api-utils';
 
+const DEFAULT_JOB_PAGE_SIZE = 15;
+const MAX_JOB_PAGE_SIZE = 50;
+
+function positiveInteger(value, fallback) {
+  const parsed = Number.parseInt(value || '', 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export const GET = withApiHandler(
   { platform: true, auth: false, platformAuth: true },
-  async () => {
+  async (request) => {
     const sql = controlPlaneSql();
+    const url = new URL(request.url);
+    const jobsPage = positiveInteger(url.searchParams.get('jobsPage'), 1);
+    const jobsPageSize = Math.min(
+      positiveInteger(url.searchParams.get('jobsPageSize'), DEFAULT_JOB_PAGE_SIZE),
+      MAX_JOB_PAGE_SIZE,
+    );
+    const jobsOffset = (jobsPage - 1) * jobsPageSize;
 
     const [summary] = await sql`
       SELECT
@@ -28,11 +43,14 @@ export const GET = withApiHandler(
         t.data_location_status,
         t.created_at,
         t.updated_at,
+        latest_job.id AS provisioning_job_id,
         latest_job.status AS provisioning_job_status,
         latest_job.current_step AS provisioning_current_step,
         latest_job.attempt_count AS provisioning_attempt_count,
         latest_job.error_code AS provisioning_error_code,
         latest_job.error_message AS provisioning_error_message,
+        latest_job.started_at AS provisioning_started_at,
+        latest_job.finished_at AS provisioning_finished_at,
         current_subscription.id AS subscription_id,
         current_subscription.status AS subscription_status,
         current_subscription.starts_at AS subscription_starts_at,
@@ -46,7 +64,15 @@ export const GET = withApiHandler(
         COALESCE(flag_summary.total, 0)::int AS feature_flag_count
       FROM tenants t
       LEFT JOIN LATERAL (
-        SELECT status, current_step, attempt_count, error_code, error_message
+        SELECT
+          id,
+          status,
+          current_step,
+          attempt_count,
+          error_code,
+          error_message,
+          started_at,
+          finished_at
         FROM provisioning_jobs
         WHERE tenant_id = t.id
         ORDER BY created_at DESC
@@ -122,7 +148,17 @@ export const GET = withApiHandler(
       JOIN tenants t ON t.id = s.tenant_id
       JOIN plans p ON p.id = s.plan_id
       WHERE t.deleted_at IS NULL
-      ORDER BY s.created_at DESC
+      ORDER BY
+        t.name,
+        CASE WHEN s.status = 'active' THEN 0 ELSE 1 END,
+        s.starts_at DESC
+    `;
+
+    const [{ total: provisioningJobTotal }] = await sql`
+      SELECT COUNT(*)::int AS total
+      FROM provisioning_jobs pj
+      JOIN tenants t ON t.id = pj.tenant_id
+      WHERE t.deleted_at IS NULL
     `;
 
     const provisioningJobs = await sql`
@@ -145,7 +181,8 @@ export const GET = withApiHandler(
       JOIN tenants t ON t.id = pj.tenant_id
       WHERE t.deleted_at IS NULL
       ORDER BY pj.created_at DESC
-      LIMIT 100
+      LIMIT ${jobsPageSize}
+      OFFSET ${jobsOffset}
     `;
 
     const channels = await sql`
@@ -191,6 +228,12 @@ export const GET = withApiHandler(
       plans,
       subscriptions,
       provisioningJobs,
+      provisioningJobsPage: {
+        page: jobsPage,
+        pageSize: jobsPageSize,
+        total: provisioningJobTotal,
+        totalPages: Math.max(1, Math.ceil(provisioningJobTotal / jobsPageSize)),
+      },
       channels,
       featureFlags,
       phaseOwnership: {
