@@ -12,6 +12,7 @@ const migration008 = read(
   '../../../../../packages/db/src/migrations/control/008_platform_audit_append_only.sql',
 );
 const migrationRunner = read('../../../../../packages/db/src/migrations/index.js');
+const dbClient = read('../../../../../packages/db/src/client.js');
 const controlSchema = read('../../../../../packages/db/src/schema/control-plane.js');
 const authCapabilities = read('../auth/tenant-capability-service.js');
 const quotaService = read('../auth/tenant-quota-service.js');
@@ -100,7 +101,7 @@ describe('complete platform operations contract', () => {
   });
 
   it('keeps platform audit evidence append-only for runtime callers', () => {
-    expect(migration008).toContain('platform_audit_logs_are_append_only');
+    expect(migration008).toContain('platform_audit_logs_append_only');
     expect(migration008).toContain('BEFORE UPDATE OR DELETE');
     expect(migrationRunner).toContain(
       'REVOKE UPDATE, DELETE ON control_plane.platform_audit_logs',
@@ -119,9 +120,9 @@ describe('complete platform operations contract', () => {
     expect(authCapabilities).toContain("source = !subscription");
     expect(authCapabilities).toContain('s.starts_at <= NOW()');
     expect(authCapabilities).toContain('s.ends_at IS NULL OR s.ends_at > NOW()');
-    expect(controlCenterRoute).toContain('current_subscription.starts_at <= NOW()');
+    expect(controlCenterRoute).toContain('current_item.starts_at <= NOW()');
     expect(controlCenterRoute).toContain(
-      'current_subscription.ends_at IS NULL OR current_subscription.ends_at > NOW()',
+      'current_item.ends_at IS NULL OR current_item.ends_at > NOW()',
     );
   });
 
@@ -136,10 +137,12 @@ describe('complete platform operations contract', () => {
   });
 
   it('creates bounded, secret-free exports from one repeatable-read snapshot', () => {
-    expect(exportRoute).toContain("isolation: 'repeatable read'");
+    expect(exportRoute).toContain('const snapshot = await sql.snapshot');
+    expect(dbClient).toContain("sql.begin('isolation level repeatable read read only'");
     expect(exportRoute).toContain('EXPORT_PAGE_SIZE');
     expect(exportRoute).toContain('LIMIT $1 OFFSET $2');
-    expect(exportRoute).toContain('channel_config_encrypted');
+    expect(exportRoute).toContain('const SECRET_COLUMN');
+    expect(exportRoute).toContain('!SECRET_COLUMN.test(column)');
     expect(exportRoute).toContain('MAX_EXPORT_BYTES');
     expect(exportRoute).toContain('Buffer.byteLength');
   });
@@ -147,13 +150,13 @@ describe('complete platform operations contract', () => {
   it('executes leased and restart-safe permanent purge including object storage', () => {
     expect(workerOps).toContain('lease_expires_at');
     expect(workerOps).toContain('SKIP LOCKED');
-    expect(workerOps).toContain('purgeStoragePrefix');
+    expect(workerOps).toContain('purgeTenantObjectStorage');
     expect(workerOps).toContain('destruction_pending');
     expect(workerOps).toContain('reconciliation_required');
     expect(workerOps).toContain('DROP SCHEMA IF EXISTS');
     expect(workerOps).toContain("'tenant.purged'");
-    expect(workerOps).toContain('activePlatformOps');
-    expect(workerOps).toContain('await activePlatformOps');
+    expect(workerOps).toContain('activeOperations');
+    expect(workerOps).toContain('await activeOperations');
     expect(workerOps).not.toContain('setInterval(');
 
     expect(deleteRoute).toContain('FOR UPDATE');
@@ -163,8 +166,9 @@ describe('complete platform operations contract', () => {
 
   it('reports every worker replica and failed queue as platform attention', () => {
     expect(workerOps).toContain('ON CONFLICT (service_name, instance_id)');
-    expect(opsRoute).toContain('workerInstances');
-    expect(opsRoute).toContain("queue.status !== 'healthy'");
+    expect(opsRoute).toContain('healthyInstanceCount');
+    expect(opsRoute).toContain("queue.status === 'healthy'");
+    expect(opsRoute).toContain('Number(queue.failed || 0) === 0');
     expect(opsRoute).toContain('reconciliation_required');
   });
 });
