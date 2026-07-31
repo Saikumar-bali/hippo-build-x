@@ -7,7 +7,7 @@ import {
 } from './platform-ops-service.js';
 
 describe('platform operations input contracts', () => {
-  it('normalizes a commercial plan and deduplicates modules', () => {
+  it('normalizes enforced commercial entitlements and deduplicates modules', () => {
     expect(
       normalizePlanInput({
         code: 'growth_plus',
@@ -36,22 +36,55 @@ describe('platform operations input contracts', () => {
       entitlements: {
         users: 100,
         projects: 15,
-        storageGb: 150,
         modules: ['projects', 'crm'],
       },
     });
+    expect(
+      normalizePlanInput({
+        code: 'NO_MODULES',
+        name: 'No Modules',
+        entitlements: { users: 1, projects: 1, modules: [] },
+      }).entitlements.modules,
+    ).toEqual([]);
   });
 
-  it('rejects unsafe plan codes and invalid commercial status', () => {
+  it('rejects unsafe plan codes and invalid commercial numbers', () => {
     expect(() =>
       normalizePlanInput({ code: 'growth plan', name: 'Growth', status: 'active' }),
     ).toThrow(/uppercase letters/i);
     expect(() =>
       normalizePlanInput({ code: 'GROWTH', name: 'Growth', status: 'draft' }),
     ).toThrow(/invalid plan status/i);
+
+    for (const value of [-1, 'free', 12.5]) {
+      expect(() =>
+        normalizePlanInput({
+          code: 'GROWTH',
+          name: 'Growth',
+          monthlyPriceCents: value,
+        }),
+      ).toThrow(/monthly price/i);
+    }
+    expect(() =>
+      normalizePlanInput({
+        code: 'GROWTH',
+        name: 'Growth',
+        entitlements: { users: 'many', projects: 1, modules: ['projects'] },
+      }),
+    ).toThrow(/user limit/i);
   });
 
-  it('validates subscription chronology and lifecycle status', () => {
+  it('validates scheduled subscriptions, chronology and lifecycle status', () => {
+    expect(
+      normalizeSubscriptionInput({
+        tenantId: 'tenant-id',
+        planId: 'plan-id',
+        status: 'scheduled',
+        startsAt: '2026-08-10T00:00:00.000Z',
+        endsAt: '2026-09-10T00:00:00.000Z',
+      }),
+    ).toMatchObject({ status: 'scheduled' });
+
     expect(() =>
       normalizeSubscriptionInput({
         tenantId: 'tenant-id',
