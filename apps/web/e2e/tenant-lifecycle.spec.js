@@ -74,8 +74,8 @@ test.describe('Locked tenant lifecycle', () => {
     await expect(page.getByText('Platform administrators')).toBeVisible();
     await expect(page.getByText(PLATFORM_EMAIL)).toBeVisible();
 
-    await page.getByRole('button', { name: /Platform Administrator/i }).click();
-    await page.getByText('Sign out').click();
+    await page.locator('header').getByRole('button', { name: /Super administrator/i }).click();
+    await page.getByText('Sign out', { exact: true }).click();
     await page.waitForURL('**/platform/login');
 
     await page.goto('/login');
