@@ -65,7 +65,8 @@ describe('complete platform operations contract', () => {
     expect(component).toContain('Suspend before offboarding');
     expect(component).toContain('Scheduled — starts in the future');
     expect(component).not.toContain('storageGb');
-    expect(component).not.toMatch(/Phase 12/i);
+    expect(component).not.toContain('Plan records are ready');
+    expect(component).not.toContain('Creating, editing and assigning them is owned by Phase 12');
     expect(component).not.toContain('Automatic protection');
     expect(css).toContain('linear-gradient');
     expect(css).toContain('.sider');
