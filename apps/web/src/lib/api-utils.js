@@ -15,6 +15,7 @@ import { createControlPlaneSql, createTenantSql } from '@hippo/db';
 import { verifyAccessToken } from './auth.js';
 import { extractAccessToken } from '@/modules/auth/cookie.js';
 import { loadUserAuthz } from '@/modules/auth/session-service.js';
+import { assertAccessSessionActive } from '@/modules/auth/session-validation.js';
 import { loadTenantCapabilities } from '@/modules/auth/tenant-capability-service.js';
 import { loadPlatformUser } from '@/modules/platform/platform-auth-service.js';
 import { enforceNotAuditorWrite, enforcePermission } from '@hippo/rbac';
@@ -91,6 +92,11 @@ export async function resolveAuthFromRequest(request) {
   if (tenant.isolation_mode === 'dedicated_database' && !tenant.database_secret_ref) {
     throw new AppError(ErrorCode.SERVICE_UNAVAILABLE, 'Tenant data source is not ready', 503);
   }
+
+  // Access JWTs are intentionally short-lived, but platform suspension and
+  // incident response require immediate invalidation. The durable session row
+  // is therefore checked on every authenticated request before authorization.
+  await assertAccessSessionActive(tenant.schema_name, tenant.id, payload.sid, payload.sub);
 
   const [authz, capabilities] = await Promise.all([
     loadUserAuthz(tenant.schema_name, payload.sub, tenant.id),
