@@ -20,7 +20,7 @@ describe.skipIf(!hasDb)('locked control plane migrations', () => {
   beforeAll(async () => runControlPlaneMigrations());
   afterAll(async () => closeDb());
 
-  it('is idempotent and stores application tables outside public', async () => {
+  it('is idempotent and stores every PRD section 5 control-plane entity outside public', async () => {
     const first = await runControlPlaneMigrations();
     const second = await runControlPlaneMigrations();
     expect(second.applied).toEqual([]);
@@ -31,11 +31,17 @@ describe.skipIf(!hasDb)('locked control plane migrations', () => {
       SELECT table_name FROM information_schema.tables
       WHERE table_schema = 'control_plane'
         AND table_type = 'BASE TABLE'
-        AND table_name IN ('tenants', 'platform_users', 'provisioning_jobs', 'tenant_channels')
+        AND table_name IN (
+          'tenants', 'platform_users', 'plans', 'subscriptions',
+          'provisioning_jobs', 'tenant_channels', 'feature_flags'
+        )
     `;
     expect(controlTables.map((row) => row.table_name).sort()).toEqual([
+      'feature_flags',
+      'plans',
       'platform_users',
       'provisioning_jobs',
+      'subscriptions',
       'tenant_channels',
       'tenants',
     ]);
@@ -99,7 +105,7 @@ describe.skipIf(!hasDb)('tenant provisioning state', () => {
     }
   });
 
-  it('creates immutable schema, local migration ledger, admin and channel vault', async () => {
+  it('creates immutable schema, storage prefix, migration ledger, admin and channel vaults', async () => {
     const steps = [];
     const result = await provisionTenantSchema(tenantId, schemaName, {
       adminEmail: `admin@${slug}.test`,
@@ -131,18 +137,31 @@ describe.skipIf(!hasDb)('tenant provisioning state', () => {
 
     const cp = createControlPlaneSql();
     const [tenant] = await cp`
-      SELECT status, migration_version FROM tenants WHERE id = ${tenantId}
+      SELECT status, storage_prefix, migration_version FROM tenants WHERE id = ${tenantId}
     `;
     expect(tenant.status).toBe(TENANT_STATUS.ACTIVE);
+    expect(tenant.storage_prefix).toBe(`tenants/${tenantId}/`);
     expect(tenant.migration_version).toContain('999_locked_tenant_rls.sql');
 
     const channels = await cp`
       SELECT channel_type, encrypted_credentials, verification_status
-      FROM tenant_channels WHERE tenant_id = ${tenantId}
+      FROM tenant_channels
+      WHERE tenant_id = ${tenantId}
+      ORDER BY channel_type
     `;
     expect(channels).toEqual([
       {
-        channel_type: 'default',
+        channel_type: 'email',
+        encrypted_credentials: null,
+        verification_status: 'not_configured',
+      },
+      {
+        channel_type: 'sms',
+        encrypted_credentials: null,
+        verification_status: 'not_configured',
+      },
+      {
+        channel_type: 'whatsapp',
         encrypted_credentials: null,
         verification_status: 'not_configured',
       },
@@ -161,7 +180,7 @@ describe.skipIf(!hasDb)('tenant provisioning state', () => {
     });
 
     const results = await runTenantMigrationFleet({ statuses: ['active'] });
-    const upgraded = results.find((result) => result.tenantId === tenantId);
+    const upgraded = results.find((migrationResult) => migrationResult.tenantId === tenantId);
     expect(upgraded).toMatchObject({ ok: true });
     expect(upgraded.applied).toContain('999_locked_tenant_rls.sql');
 
