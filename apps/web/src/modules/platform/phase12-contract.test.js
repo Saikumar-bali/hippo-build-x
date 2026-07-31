@@ -9,7 +9,7 @@ const css = read('./PlatformControlCenter.module.css');
 const migration006 = read('../../../../../packages/db/src/migrations/control/006_phase12_platform_ops.sql');
 const migration007 = read('../../../../../packages/db/src/migrations/control/007_phase12_hardening.sql');
 const migration008 = read(
-  '../../../../../packages/db/src/migrations/control/008_platform_audit_immutability.sql',
+  '../../../../../packages/db/src/migrations/control/008_platform_audit_append_only.sql',
 );
 const migrationRunner = read('../../../../../packages/db/src/migrations/index.js');
 const controlSchema = read('../../../../../packages/db/src/schema/control-plane.js');
