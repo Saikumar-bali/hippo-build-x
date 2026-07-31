@@ -15,6 +15,7 @@ import {
 } from './provisioning-attempt.js';
 import { reportProvisioningStep } from './provisioning-progress.js';
 import { startPlatformOpsLoops } from './platform-ops.js';
+import { ensureStarterTrial } from './subscription-provisioning.js';
 
 const log = createLogger({ service: 'hippo-worker' });
 validateEnv(workerEnvSchema);
@@ -156,6 +157,7 @@ const tenantProvisionWorker = new Worker(
             includeBullMqProgress: true,
           }),
       });
+      const starterTrial = await ensureStarterTrial(tenantId);
       await reportJobState({
         currentStep: 'active',
         values: { status: 'completed', currentStep: 'active', finished: true },
@@ -163,8 +165,13 @@ const tenantProvisionWorker = new Worker(
         tenantId,
         provisioningJobId,
       });
-      log.info('Tenant provisioned', { ...result, provisioningJobId, jobId: job.id });
-      return result;
+      log.info('Tenant provisioned', {
+        ...result,
+        starterTrialCreated: starterTrial.created,
+        provisioningJobId,
+        jobId: job.id,
+      });
+      return { ...result, starterTrialCreated: starterTrial.created };
     } catch (error) {
       const errorMessage = String(error.message).slice(0, 2000);
       const failure = getProvisioningFailureTransition(job, errorMessage);
