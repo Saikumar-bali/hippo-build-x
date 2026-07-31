@@ -35,22 +35,27 @@ export const GET = withApiHandler(
     const [commercialSummary] = await sql`
       SELECT
         COUNT(DISTINCT tenant.id)
-          FILTER (WHERE tenant.deleted_at IS NULL AND subscription.status IN ('active','trial','paused'))::int
+          FILTER (WHERE tenant.deleted_at IS NULL AND current_subscription.id IS NOT NULL)::int
           AS subscribed,
         COUNT(DISTINCT tenant.id)
           FILTER (WHERE tenant.deleted_at IS NULL AND current_subscription.id IS NULL)::int
           AS without_plan,
-        COUNT(*) FILTER (WHERE subscription.status = 'trial')::int AS trials
+        COUNT(DISTINCT tenant.id)
+          FILTER (
+            WHERE tenant.deleted_at IS NULL
+              AND current_subscription.status = 'trial'
+          )::int AS trials
       FROM tenants tenant
       LEFT JOIN LATERAL (
-        SELECT id
+        SELECT id, status
         FROM subscriptions current_item
         WHERE current_item.tenant_id = tenant.id
           AND current_item.status IN ('active','trial','paused')
+          AND current_item.starts_at <= NOW()
+          AND (current_item.ends_at IS NULL OR current_item.ends_at > NOW())
         ORDER BY current_item.starts_at DESC
         LIMIT 1
       ) current_subscription ON true
-      LEFT JOIN subscriptions subscription ON subscription.id = current_subscription.id
     `;
 
     const tenants = await sql.unsafe(`
@@ -104,7 +109,8 @@ export const GET = withApiHandler(
           WHEN t.status = 'suspended' THEN 'paused'
           WHEN t.status = 'active'
                AND t.data_location_status = 'ready'
-               AND t.migration_version IS NOT NULL THEN 'healthy'
+               AND t.migration_version IS NOT NULL
+               AND current_subscription.id IS NOT NULL THEN 'healthy'
           ELSE 'attention'
         END AS health_status
       FROM tenants t
@@ -121,9 +127,10 @@ export const GET = withApiHandler(
         SELECT id, plan_id, status, starts_at, ends_at
         FROM subscriptions
         WHERE tenant_id = t.id
-        ORDER BY
-          CASE WHEN status IN ('active','trial','paused') THEN 0 ELSE 1 END,
-          starts_at DESC
+          AND status IN ('active','trial','paused')
+          AND starts_at <= NOW()
+          AND (ends_at IS NULL OR ends_at > NOW())
+        ORDER BY starts_at DESC
         LIMIT 1
       ) current_subscription ON true
       LEFT JOIN plans current_plan ON current_plan.id = current_subscription.plan_id
@@ -178,6 +185,8 @@ export const GET = withApiHandler(
         COUNT(DISTINCT s.tenant_id)
           FILTER (
             WHERE s.status IN ('active','trial','paused')
+              AND s.starts_at <= NOW()
+              AND (s.ends_at IS NULL OR s.ends_at > NOW())
               AND subscribed_tenant.id IS NOT NULL
           )::int AS active_subscription_count
       FROM plans p
@@ -204,7 +213,13 @@ export const GET = withApiHandler(
       WHERE t.deleted_at IS NULL
       ORDER BY
         t.name,
-        CASE WHEN s.status IN ('active','trial','paused') THEN 0 ELSE 1 END,
+        CASE
+          WHEN s.status IN ('active','trial','paused')
+               AND s.starts_at <= NOW()
+               AND (s.ends_at IS NULL OR s.ends_at > NOW()) THEN 0
+          WHEN s.status = 'scheduled' THEN 1
+          ELSE 2
+        END,
         s.starts_at DESC
     `;
 
