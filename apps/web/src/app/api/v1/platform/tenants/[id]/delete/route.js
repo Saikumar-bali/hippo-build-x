@@ -13,13 +13,27 @@ import {
   writePlatformAudit,
 } from '@/modules/platform/platform-ops-service.js';
 
-const DEFAULT_RETENTION_DAYS = Number(process.env.TENANT_PURGE_RETENTION_DAYS || 30);
+const configuredRetentionDays = Number(process.env.TENANT_PURGE_RETENTION_DAYS || 30);
+const DEFAULT_RETENTION_DAYS =
+  Number.isInteger(configuredRetentionDays) && configuredRetentionDays >= 1 && configuredRetentionDays <= 365
+    ? configuredRetentionDays
+    : 30;
 
 function confirmation(body, tenant) {
   const expected = `DELETE ${tenant.slug}`;
   if (String(body.confirmation || '').trim() !== expected) {
     throw AppError.validation(`Type ${expected} to confirm this operation`);
   }
+}
+
+function retentionDays(value) {
+  const parsed = value === undefined || value === null || value === ''
+    ? DEFAULT_RETENTION_DAYS
+    : Number(value);
+  if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 1 || parsed > 365) {
+    throw AppError.validation('Retention period must be a whole number from 1 to 365 days');
+  }
+  return parsed;
 }
 
 export const POST = withApiHandler(
@@ -43,10 +57,14 @@ export const POST = withApiHandler(
     confirmation(body, tenant);
 
     if (mode === 'release_hold') {
-      if (!tenant.deleted_at || tenant.data_location_status !== 'soft_deleted') {
-        throw AppError.conflict('Legal holds are managed only during the soft-delete recovery window');
-      }
       const result = await sql.begin(async (tx) => {
+        const [lockedTenant] = await tx`
+          SELECT id, deleted_at, data_location_status
+          FROM tenants WHERE id = ${id} FOR UPDATE
+        `;
+        if (!lockedTenant?.deleted_at || lockedTenant.data_location_status !== 'soft_deleted') {
+          throw AppError.conflict('Legal holds are managed only during the soft-delete recovery window');
+        }
         const [before] = await tx`
           SELECT id, mode, status, legal_hold, reason, evidence, requested_at
           FROM tenant_deletion_jobs
@@ -99,6 +117,22 @@ export const POST = withApiHandler(
 
       const revokedSessions = await revokeTenantSessions(tenant);
       const result = await sql.begin(async (tx) => {
+        const [lockedTenant] = await tx`
+          SELECT id, name, slug, status, data_location_status, deleted_at
+          FROM tenants WHERE id = ${id} FOR UPDATE
+        `;
+        if (lockedTenant.deleted_at) {
+          const [existing] = await tx`
+            SELECT id, mode, status, legal_hold, requested_at, completed_at, reason
+            FROM tenant_deletion_jobs
+            WHERE tenant_id = ${id} AND mode = 'soft_delete'
+            ORDER BY requested_at DESC LIMIT 1
+          `;
+          return { job: existing, tenant: lockedTenant, revokedSessions: 0, idempotentReplay: true };
+        }
+        if (lockedTenant.status !== 'suspended') {
+          throw AppError.conflict('Suspend the company before starting offboarding');
+        }
         const [job] = await tx`
           INSERT INTO tenant_deletion_jobs
             (tenant_id, mode, status, legal_hold, requested_by, approved_by,
@@ -113,7 +147,7 @@ export const POST = withApiHandler(
           UPDATE subscriptions
           SET status = 'cancelled', ends_at = COALESCE(ends_at, NOW()),
               cancelled_at = COALESCE(cancelled_at, NOW()), updated_at = NOW()
-          WHERE tenant_id = ${id} AND status IN ('active', 'trial', 'paused')
+          WHERE tenant_id = ${id} AND status IN ('scheduled', 'active', 'trial', 'paused')
         `;
         const [after] = await tx`
           UPDATE tenants
@@ -128,57 +162,73 @@ export const POST = withApiHandler(
           entityType: 'tenant',
           entityId: id,
           tenantId: id,
-          before: tenant,
+          before: lockedTenant,
           after,
           metadata: { reason, legalHold: Boolean(body.legalHold), revokedSessions, deletionJobId: job.id },
           sql: tx,
         });
         return { job, tenant: after, revokedSessions };
       });
-      return successResponse(result);
+      return successResponse(result, result.idempotentReplay ? { idempotentReplay: true } : {});
     }
 
-    if (!tenant.deleted_at || tenant.data_location_status !== 'soft_deleted') {
-      throw AppError.conflict('Soft-delete the company before scheduling permanent purge');
-    }
-    const [hold] = await sql`
-      SELECT id FROM tenant_deletion_jobs
-      WHERE tenant_id = ${id} AND legal_hold = true
-      ORDER BY requested_at DESC LIMIT 1
-    `;
-    if (hold) throw AppError.conflict('Remove the legal hold before scheduling permanent purge');
+    const days = retentionDays(body.retentionDays);
+    const scheduledFor = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+    const result = await sql.begin(async (tx) => {
+      // Serializing on the tenant row, plus the partial unique index, prevents
+      // concurrent approvals from creating two active purge jobs.
+      const [lockedTenant] = await tx`
+        SELECT id, slug, deleted_at, data_location_status
+        FROM tenants WHERE id = ${id} FOR UPDATE
+      `;
+      if (!lockedTenant?.deleted_at || lockedTenant.data_location_status !== 'soft_deleted') {
+        throw AppError.conflict('Soft-delete the company before scheduling permanent purge');
+      }
+      const [hold] = await tx`
+        SELECT id FROM tenant_deletion_jobs
+        WHERE tenant_id = ${id} AND legal_hold = true
+        ORDER BY requested_at DESC LIMIT 1
+        FOR UPDATE
+      `;
+      if (hold) throw AppError.conflict('Remove the legal hold before scheduling permanent purge');
 
-    const retentionDays = Math.max(1, Math.min(365, Number(body.retentionDays || DEFAULT_RETENTION_DAYS)));
-    const scheduledFor = new Date(Date.now() + retentionDays * 24 * 60 * 60 * 1000).toISOString();
-    const existing = await sql`
-      SELECT id, mode, status, requested_at, scheduled_for, reason
-      FROM tenant_deletion_jobs
-      WHERE tenant_id = ${id} AND mode = 'purge' AND status IN ('scheduled', 'running')
-      ORDER BY requested_at DESC LIMIT 1
-    `;
-    if (existing[0]) {
-      return successResponse(existing[0], { idempotentReplay: true });
-    }
+      const [existing] = await tx`
+        SELECT id, tenant_id, mode, status, requested_at, scheduled_for, reason
+        FROM tenant_deletion_jobs
+        WHERE tenant_id = ${id}
+          AND mode = 'purge'
+          AND status IN ('scheduled', 'running', 'destruction_pending', 'reconciliation_required')
+        ORDER BY requested_at DESC LIMIT 1
+        FOR UPDATE
+      `;
+      if (existing) return { job: existing, idempotentReplay: true };
 
-    const [job] = await sql`
-      INSERT INTO tenant_deletion_jobs
-        (tenant_id, mode, status, legal_hold, requested_by, approved_by,
-         requested_at, scheduled_for, reason, evidence)
-      VALUES
-        (${id}, 'purge', 'scheduled', false, ${actor.id}, ${actor.id}, NOW(),
-         ${scheduledFor}, ${reason},
-         ${JSON.stringify({ retentionDays, confirmation: `DELETE ${tenant.slug}` })}::jsonb)
-      RETURNING id, tenant_id, mode, status, requested_at, scheduled_for, reason
-    `;
-    await writePlatformAudit({
-      actor,
-      action: 'tenant.purge_scheduled',
-      entityType: 'tenant_deletion',
-      entityId: job.id,
-      tenantId: id,
-      after: job,
-      metadata: { retentionDays, reason },
+      const [job] = await tx`
+        INSERT INTO tenant_deletion_jobs
+          (tenant_id, mode, status, legal_hold, requested_by, approved_by,
+           requested_at, scheduled_for, reason, evidence)
+        VALUES
+          (${id}, 'purge', 'scheduled', false, ${actor.id}, ${actor.id}, NOW(),
+           ${scheduledFor}, ${reason},
+           ${JSON.stringify({ retentionDays: days, confirmation: `DELETE ${lockedTenant.slug}` })}::jsonb)
+        RETURNING id, tenant_id, mode, status, requested_at, scheduled_for, reason
+      `;
+      await writePlatformAudit({
+        actor,
+        action: 'tenant.purge_scheduled',
+        entityType: 'tenant_deletion',
+        entityId: job.id,
+        tenantId: id,
+        after: job,
+        metadata: { retentionDays: days, reason },
+        sql: tx,
+      });
+      return { job, idempotentReplay: false };
     });
-    return successResponse(job, {}, 202);
+    return successResponse(
+      result.job,
+      result.idempotentReplay ? { idempotentReplay: true } : {},
+      result.idempotentReplay ? 200 : 202,
+    );
   },
 );
