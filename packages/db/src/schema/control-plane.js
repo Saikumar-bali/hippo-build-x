@@ -5,6 +5,7 @@ import {
   timestamp,
   jsonb,
   unique,
+  primaryKey,
   text,
   integer,
   boolean,
@@ -206,19 +207,35 @@ export const tenantDeletionJobs = controlPlane.table('tenant_deletion_jobs', {
   startedAt: timestamp('started_at', { withTimezone: true }),
   completedAt: timestamp('completed_at', { withTimezone: true }),
   cancelledAt: timestamp('cancelled_at', { withTimezone: true }),
+  leaseOwner: varchar('lease_owner', { length: 255 }),
+  leaseExpiresAt: timestamp('lease_expires_at', { withTimezone: true }),
+  destructionStartedAt: timestamp('destruction_started_at', { withTimezone: true }),
+  storagePurgedAt: timestamp('storage_purged_at', { withTimezone: true }),
+  schemaDroppedAt: timestamp('schema_dropped_at', { withTimezone: true }),
+  reconciliationRequired: boolean('reconciliation_required').notNull().default(false),
+  attemptCount: integer('attempt_count').notNull().default(0),
   reason: text('reason'),
   errorMessage: text('error_message'),
   evidence: jsonb('evidence').notNull().default({}),
 });
 
-export const serviceHeartbeats = controlPlane.table('service_heartbeats', {
-  serviceName: varchar('service_name', { length: 100 }).primaryKey(),
-  instanceId: varchar('instance_id', { length: 255 }).notNull(),
-  status: varchar('status', { length: 30 }).notNull().default('healthy'),
-  metadata: jsonb('metadata').notNull().default({}),
-  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const serviceHeartbeats = controlPlane.table(
+  'service_heartbeats',
+  {
+    serviceName: varchar('service_name', { length: 100 }).notNull(),
+    instanceId: varchar('instance_id', { length: 255 }).notNull(),
+    status: varchar('status', { length: 30 }).notNull().default('healthy'),
+    metadata: jsonb('metadata').notNull().default({}),
+    lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({
+      name: 'service_heartbeats_pkey',
+      columns: [table.serviceName, table.instanceId],
+    }),
+  ],
+);
 
 export const TENANT_STATUS = Object.freeze({
   PROVISIONING: 'provisioning',
