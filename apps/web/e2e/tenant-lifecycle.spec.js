@@ -48,7 +48,7 @@ test.describe('Locked tenant lifecycle', () => {
     await expect(drawer.locator('.ant-table-tbody')).toContainText('whatsapp');
 
     await drawer.getByText('Advanced details').click();
-    await expect(drawer.getByText(new RegExp(`tenants/${tenantSlug.includes('never') ? tenantSlug : '[0-9a-f-]+'}/`))).toBeVisible();
+    await expect(drawer.getByText(/tenants\/[0-9a-f-]+\//)).toBeVisible();
     await page.locator('.ant-drawer-close').click();
 
     await page.getByRole('tab', { name: 'Setup activity' }).click();
