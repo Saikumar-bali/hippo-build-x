@@ -168,28 +168,37 @@ describe.skipIf(!hasDb)('tenant provisioning state', () => {
     ]);
   });
 
-  it('upgrades an already-active tenant through the fleet runner', async () => {
+  it('upgrades its own active tenant through the fleet runner', async () => {
     const operator = getMigrationSql();
-    await operator.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL search_path TO "${schemaName}", pg_catalog`);
-      await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-      await tx.unsafe(`ALTER TABLE users DISABLE ROW LEVEL SECURITY`);
-      await tx`DELETE FROM _tenant_migrations WHERE migration_name = '999_locked_tenant_rls.sql'`;
-      await tx`DELETE FROM control_plane.tenant_migrations
-               WHERE tenant_id = ${tenantId} AND migration_name = '999_locked_tenant_rls.sql'`;
-    });
+    const cp = createControlPlaneSql();
+    const fleetTestStatus = `migration_test_${tenantId.replaceAll('-', '')}`;
 
-    const results = await runTenantMigrationFleet({ statuses: ['active'] });
-    const upgraded = results.find((migrationResult) => migrationResult.tenantId === tenantId);
-    expect(upgraded).toMatchObject({ ok: true });
-    expect(upgraded.applied).toContain('999_locked_tenant_rls.sql');
+    await cp`UPDATE tenants SET status = ${fleetTestStatus} WHERE id = ${tenantId}`;
+    try {
+      await operator.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL search_path TO "${schemaName}", pg_catalog`);
+        await tx`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+        await tx.unsafe(`ALTER TABLE users DISABLE ROW LEVEL SECURITY`);
+        await tx`DELETE FROM _tenant_migrations WHERE migration_name = '999_locked_tenant_rls.sql'`;
+        await tx`DELETE FROM control_plane.tenant_migrations
+                 WHERE tenant_id = ${tenantId} AND migration_name = '999_locked_tenant_rls.sql'`;
+      });
 
-    const [policy] = await operator`
-      SELECT c.relrowsecurity, c.relforcerowsecurity
-      FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-      WHERE n.nspname = ${schemaName} AND c.relname = 'users'
-    `;
-    expect(policy).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true });
+      const results = await runTenantMigrationFleet({ statuses: [fleetTestStatus] });
+      expect(results).toHaveLength(1);
+      const upgraded = results[0];
+      expect(upgraded).toMatchObject({ tenantId, ok: true });
+      expect(upgraded.applied).toContain('999_locked_tenant_rls.sql');
+
+      const [policy] = await operator`
+        SELECT c.relrowsecurity, c.relforcerowsecurity
+        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = ${schemaName} AND c.relname = 'users'
+      `;
+      expect(policy).toMatchObject({ relrowsecurity: true, relforcerowsecurity: true });
+    } finally {
+      await cp`UPDATE tenants SET status = ${TENANT_STATUS.ACTIVE} WHERE id = ${tenantId}`;
+    }
   });
 
   it('is idempotent and validates migration checksums', async () => {
