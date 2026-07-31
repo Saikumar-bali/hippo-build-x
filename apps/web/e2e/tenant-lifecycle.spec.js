@@ -36,8 +36,9 @@ test.describe('Locked tenant lifecycle', () => {
     await modal.getByRole('textbox', { name: 'Administrator name' }).fill('E2E Admin');
     await modal.getByRole('button', { name: 'Start setup' }).click();
 
-    await expect(page.locator('.ant-table-tbody')).toContainText(tenantName, { timeout: 20000 });
-    await expect(page.locator('.ant-table-tbody')).toContainText('Ready', { timeout: 30000 });
+    const organizationsTable = page.locator('.ant-tabs-tabpane-active .ant-table-tbody');
+    await expect(organizationsTable).toContainText(tenantName, { timeout: 20000 });
+    await expect(organizationsTable).toContainText('Ready', { timeout: 30000 });
 
     const drawer = page.locator('.ant-drawer-content');
     await expect(drawer).toBeVisible();
@@ -52,8 +53,9 @@ test.describe('Locked tenant lifecycle', () => {
     await page.locator('.ant-drawer-close').click();
 
     await page.getByRole('tab', { name: 'Setup activity' }).click();
-    await expect(page.locator('.ant-table-tbody')).toContainText(tenantName);
-    await expect(page.locator('.ant-table-tbody')).toContainText('Completed');
+    const setupTable = page.locator('.ant-tabs-tabpane-active .ant-table-tbody');
+    await expect(setupTable).toContainText(tenantName);
+    await expect(setupTable).toContainText('Completed');
 
     await page.getByRole('button', { name: 'Logout' }).click();
     await page.waitForURL('**/platform/login');
