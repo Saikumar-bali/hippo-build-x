@@ -48,6 +48,19 @@ describe('platform control center contract', () => {
     expect(componentSource).not.toContain('item.tenant_id === selectedId');
   });
 
+  it('counts distinct non-deleted companies for plan summaries', () => {
+    expect(routeSource).toContain('COUNT(DISTINCT s.tenant_id)');
+    expect(routeSource).toContain('subscribed_tenant.deleted_at IS NULL');
+    expect(routeSource).not.toContain('COUNT(s.id)::int AS subscription_count');
+  });
+
+  it('ignores responses superseded by polling or pagination', () => {
+    expect(componentSource).toContain('const requestSequence = useRef(0)');
+    expect(componentSource).toContain('const sequence = ++requestSequence.current');
+    expect(componentSource).toContain('if (sequence !== requestSequence.current) return;');
+    expect(componentSource).toContain('if (sequence === requestSequence.current) setLoading(false)');
+  });
+
   it('renders platform administrators returned by the API', () => {
     expect(componentSource).toContain('data.platformUsers');
     expect(componentSource).toContain('Platform administrators');
