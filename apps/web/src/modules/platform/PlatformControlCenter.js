@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -62,14 +62,12 @@ const EMPTY = {
 };
 
 const formatDate = (value) => (value ? new Date(value).toLocaleString() : '—');
-const subscriptionColor = (status) =>
-  status === 'active'
-    ? 'green'
-    : status === 'trial'
-      ? 'blue'
-      : status === 'paused'
-        ? 'orange'
-        : 'default';
+const subscriptionColor = (status) => {
+  if (status === 'active') return 'green';
+  if (status === 'trial') return 'blue';
+  if (status === 'paused') return 'orange';
+  return 'default';
+};
 const subscriptionLabel = (status) =>
   ({
     active: 'Active',
@@ -78,17 +76,20 @@ const subscriptionLabel = (status) =>
     expired: 'Expired',
     cancelled: 'Cancelled',
   })[status] || status || 'Not assigned';
-const flagValue = (value) =>
-  value === true ? (
-    <Tag color="green">On</Tag>
-  ) : value === false ? (
-    <Tag color="red">Off</Tag>
-  ) : (
-    <Tag>Not forced</Tag>
-  );
+const progressStatus = (status) => {
+  if (status === 'failed') return 'exception';
+  if (status === 'completed') return 'success';
+  return 'active';
+};
+const flagValue = (value) => {
+  if (value === true) return <Tag color="green">On</Tag>;
+  if (value === false) return <Tag color="red">Off</Tag>;
+  return <Tag>Not forced</Tag>;
+};
 
 export default function PlatformControlCenter() {
   const router = useRouter();
+  const requestSequence = useRef(0);
   const [me, setMe] = useState(null);
   const [data, setData] = useState(EMPTY);
   const [loading, setLoading] = useState(true);
@@ -102,15 +103,20 @@ export default function PlatformControlCenter() {
 
   const load = useCallback(
     async ({ quiet = false } = {}) => {
+      const sequence = ++requestSequence.current;
       if (!quiet) setLoading(true);
       setError('');
+
       try {
         const meResponse = await fetch('/api/v1/platform/auth/me', { cache: 'no-store' });
+        if (sequence !== requestSequence.current) return;
         if (meResponse.status === 401) {
           router.replace('/platform/login');
           return;
         }
-        setMe((await meResponse.json()).data?.user || null);
+        const meJson = await meResponse.json();
+        if (sequence !== requestSequence.current) return;
+        setMe(meJson.data?.user || null);
 
         const params = new URLSearchParams({
           jobsPage: String(jobPage),
@@ -120,15 +126,18 @@ export default function PlatformControlCenter() {
           cache: 'no-store',
         });
         const json = await response.json();
+        if (sequence !== requestSequence.current) return;
         if (!response.ok) {
           setError(json.errors?.[0]?.message || 'Unable to load the platform overview');
           return;
         }
         setData({ ...EMPTY, ...(json.data || {}) });
       } catch {
-        setError('Unable to reach the platform service');
+        if (sequence === requestSequence.current) {
+          setError('Unable to reach the platform service');
+        }
       } finally {
-        if (!quiet) setLoading(false);
+        if (sequence === requestSequence.current) setLoading(false);
       }
     },
     [jobPage, router],
@@ -137,6 +146,13 @@ export default function PlatformControlCenter() {
   useEffect(() => {
     load();
   }, [load]);
+
+  useEffect(
+    () => () => {
+      requestSequence.current += 1;
+    },
+    [],
+  );
 
   const hasWork = data.tenants.some(isSetupInProgress);
   useEffect(() => {
@@ -223,71 +239,60 @@ export default function PlatformControlCenter() {
     router.replace('/platform/login');
   }
 
-  const organizationColumns = useMemo(
-    () => [
-      {
-        title: 'Company',
-        dataIndex: 'name',
-        render: (name, tenant) => (
-          <Space direction="vertical" size={0}>
-            <Text strong>{name}</Text>
-            <Text type="secondary">{tenant.slug}</Text>
-          </Space>
-        ),
-      },
-      {
-        title: 'Current state',
-        dataIndex: 'status',
-        render: (status) => (
-          <Tag color={tenantStatusColor(status)}>{tenantStatusLabel(status)}</Tag>
-        ),
-      },
-      { title: 'Plan', dataIndex: 'plan_name', render: (value) => value || 'Not assigned' },
-      {
-        title: 'Setup',
-        width: 245,
-        render: (_, tenant) => (
-          <Space direction="vertical" size={2} style={{ width: '100%' }}>
-            <Text>
-              {setupStepLabel(
-                tenant.provisioning_current_step ||
-                  (tenant.status === 'active' ? 'active' : 'registered'),
-              )}
-            </Text>
-            <Progress
-              percent={setupPercent(
-                tenant.provisioning_current_step,
-                tenant.provisioning_job_status,
-              )}
-              size="small"
-              showInfo={false}
-              status={
-                tenant.provisioning_job_status === 'failed'
-                  ? 'exception'
-                  : tenant.provisioning_job_status === 'completed'
-                    ? 'success'
-                    : 'active'
-              }
-            />
-          </Space>
-        ),
-      },
-      {
-        title: 'Communication',
-        render: (_, tenant) =>
-          `${tenant.channel_verified || 0} verified / ${tenant.channel_total || 0}`,
-      },
-      {
-        title: '',
-        render: (_, tenant) => (
-          <Button icon={<EyeOutlined />} onClick={() => setSelectedId(tenant.id)}>
-            View
-          </Button>
-        ),
-      },
-    ],
-    [],
-  );
+  const organizationColumns = [
+    {
+      title: 'Company',
+      dataIndex: 'name',
+      render: (name, tenant) => (
+        <Space direction="vertical" size={0}>
+          <Text strong>{name}</Text>
+          <Text type="secondary">{tenant.slug}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: 'Current state',
+      dataIndex: 'status',
+      render: (status) => <Tag color={tenantStatusColor(status)}>{tenantStatusLabel(status)}</Tag>,
+    },
+    { title: 'Plan', dataIndex: 'plan_name', render: (value) => value || 'Not assigned' },
+    {
+      title: 'Setup',
+      width: 245,
+      render: (_, tenant) => (
+        <Space direction="vertical" size={2} style={{ width: '100%' }}>
+          <Text>
+            {setupStepLabel(
+              tenant.provisioning_current_step ||
+                (tenant.status === 'active' ? 'active' : 'registered'),
+            )}
+          </Text>
+          <Progress
+            percent={setupPercent(
+              tenant.provisioning_current_step,
+              tenant.provisioning_job_status,
+            )}
+            size="small"
+            showInfo={false}
+            status={progressStatus(tenant.provisioning_job_status)}
+          />
+        </Space>
+      ),
+    },
+    {
+      title: 'Communication',
+      render: (_, tenant) =>
+        `${tenant.channel_verified || 0} verified / ${tenant.channel_total || 0}`,
+    },
+    {
+      title: '',
+      render: (_, tenant) => (
+        <Button icon={<EyeOutlined />} onClick={() => setSelectedId(tenant.id)}>
+          View
+        </Button>
+      ),
+    },
+  ];
 
   const plansColumns = [
     { title: 'Plan name', dataIndex: 'name' },
@@ -367,7 +372,9 @@ export default function PlatformControlCenter() {
     {
       title: 'Role',
       dataIndex: 'role',
-      render: (value) => <span style={{ textTransform: 'capitalize' }}>{value?.replaceAll('_', ' ')}</span>,
+      render: (value) => (
+        <span style={{ textTransform: 'capitalize' }}>{value?.replaceAll('_', ' ')}</span>
+      ),
     },
     {
       title: 'Status',
@@ -673,13 +680,7 @@ export default function PlatformControlCenter() {
         {selected ? (
           <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Alert
-              type={
-                selected.status === 'failed'
-                  ? 'error'
-                  : selected.status === 'active'
-                    ? 'success'
-                    : 'info'
-              }
+              type={selected.status === 'failed' ? 'error' : selected.status === 'active' ? 'success' : 'info'}
               showIcon
               message={tenantStatusLabel(selected.status)}
               description={
@@ -699,9 +700,7 @@ export default function PlatformControlCenter() {
                     {tenantStatusLabel(selected.status)}
                   </Tag>
                 </Descriptions.Item>
-                <Descriptions.Item label="Added on">
-                  {formatDate(selected.created_at)}
-                </Descriptions.Item>
+                <Descriptions.Item label="Added on">{formatDate(selected.created_at)}</Descriptions.Item>
               </Descriptions>
             </Card>
             <Card title="Setup progress" size="small">
@@ -713,22 +712,14 @@ export default function PlatformControlCenter() {
               </Text>
               <Progress
                 percent={setupPercent(latestJob?.current_step, latestJob?.status)}
-                status={
-                  latestJob?.status === 'failed'
-                    ? 'exception'
-                    : latestJob?.status === 'completed'
-                      ? 'success'
-                      : 'active'
-                }
+                status={progressStatus(latestJob?.status)}
               />
               <Text type="secondary">Attempts: {latestJob?.attempt_count || 0}</Text>
             </Card>
             <Card title="Plan & subscription" size="small">
               {selectedSubscription ? (
                 <Descriptions column={1} size="small">
-                  <Descriptions.Item label="Plan">
-                    {selectedSubscription.plan_name}
-                  </Descriptions.Item>
+                  <Descriptions.Item label="Plan">{selectedSubscription.plan_name}</Descriptions.Item>
                   <Descriptions.Item label="Status">
                     <Tag color={subscriptionColor(selectedSubscription.status)}>
                       {subscriptionLabel(selectedSubscription.status)}
@@ -756,9 +747,7 @@ export default function PlatformControlCenter() {
                     {
                       title: 'Type',
                       dataIndex: 'channel_type',
-                      render: (value) => (
-                        <span style={{ textTransform: 'capitalize' }}>{value}</span>
-                      ),
+                      render: (value) => <span style={{ textTransform: 'capitalize' }}>{value}</span>,
                     },
                     {
                       title: 'Provider',
@@ -769,10 +758,7 @@ export default function PlatformControlCenter() {
                   ]}
                 />
               ) : (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="Communication setup is pending"
-                />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="Communication setup is pending" />
               )}
             </Card>
             <Card title="Feature controls" size="small">
@@ -788,10 +774,7 @@ export default function PlatformControlCenter() {
                   ]}
                 />
               ) : (
-                <Empty
-                  image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="No platform controls are applied"
-                />
+                <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No platform controls are applied" />
               )}
             </Card>
             <Collapse
