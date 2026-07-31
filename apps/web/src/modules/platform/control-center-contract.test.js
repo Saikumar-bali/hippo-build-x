@@ -61,6 +61,18 @@ describe('platform control center contract', () => {
     expect(componentSource).toContain('if (sequence === requestSequence.current) setLoading(false)');
   });
 
+  it('serializes setup polling after each request settles', () => {
+    expect(componentSource).toContain('await load({ quiet: true })');
+    expect(componentSource).toContain('timer = setTimeout(poll, 4000)');
+    expect(componentSource).not.toContain('setInterval(');
+  });
+
+  it('includes global and company-specific feature controls in the drawer', () => {
+    expect(componentSource).toContain(
+      'flag.tenant_id === null || flag.tenant_id === selectedId',
+    );
+  });
+
   it('renders platform administrators returned by the API', () => {
     expect(componentSource).toContain('data.platformUsers');
     expect(componentSource).toContain('Platform administrators');
